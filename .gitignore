@@ -16,3 +16,5 @@ sessions/
 .env
 .env.*
 !.env.example
+
+.fix_bug/
