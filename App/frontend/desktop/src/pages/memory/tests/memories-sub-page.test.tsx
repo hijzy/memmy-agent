@@ -7,8 +7,10 @@ import {
   buildPanelItemsInput,
   loadMemoryDetail,
   loadMemoriesData,
-  MemoriesSubPageView
+  MemoriesSubPageView,
+  processingRetryErrorMessage
 } from "../memories-sub-page.js";
+import { ApiRequestError } from "../../../api/http.js";
 import {
   createMemoryRuntimeClientStub,
   memoryDetailFixture,
@@ -258,6 +260,57 @@ describe("MemoriesSubPage", () => {
     expect(html).toContain("memory-pill--failed");
   });
 
+  it("重试接口失败时保留原始处理原因，并单独展示本次重试错误", () => {
+    const processing = {
+      memoryId: memoryListItemFixture.id,
+      state: "failed" as const,
+      stage: "summary" as const,
+      activeJobId: null,
+      attemptCount: 3,
+      manualRetryCount: 0,
+      retryAction: "open_settings" as const,
+      errorCode: "model_configuration",
+      errorMessage: "openai_compatible HTTP 200: expected JSON but received HTML instead of a model API response",
+      failedAt: "2026-06-03T09:30:00.000Z",
+      updatedAt: "2026-06-03T09:30:00.000Z"
+    };
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([{ ...memoryListItemFixture, processing }]),
+      detail: {
+        status: "ready",
+        data: {
+          ...memoryDetailFixture,
+          item: { ...memoryDetailFixture.item, processing }
+        }
+      }
+    }, "zh-CN", {
+      onRetryProcessing: vi.fn(),
+      retryFeedback: {
+        memoryId: memoryListItemFixture.id,
+        status: "error",
+        message: "本地记忆服务尚未加载重试功能，请完全退出并重新打开 Memmy 后再试"
+      }
+    });
+
+    expect(html).toContain(processing.errorMessage);
+    expect(html).toContain("本次重试未成功：本地记忆服务尚未加载重试功能");
+    expect(html).toContain("memory-processing-failure__retry-error");
+  });
+
+  it("只把没有结构化错误体的 404 识别为旧的本地重试接口", () => {
+    const restartMessage = "请重启 Memmy";
+
+    expect(processingRetryErrorMessage(
+      new ApiRequestError("Request failed", 404),
+      restartMessage
+    )).toBe(restartMessage);
+    expect(processingRetryErrorMessage(
+      new ApiRequestError("memory not found", 404, "not_found"),
+      restartMessage
+    )).toBe("memory not found");
+  });
+
   it("英文模式下详情里的导入摘要占位文案使用英文", () => {
     const traceDetail = memoryDetailFixture.item.metadata.traceDetail as Record<string, unknown>;
     const pendingDetail = {
@@ -502,6 +555,7 @@ function renderMemories(
   actions: {
     onRetryProcessing?: (id: string) => void;
     onOpenSettings?: () => void;
+    retryFeedback?: NonNullable<Parameters<typeof MemoriesSubPageView>[0]["retryFeedback"]>;
   } = {}
 ): string {
   return renderToString(
@@ -519,6 +573,7 @@ function renderMemories(
         onDeleteDetail={vi.fn(async () => undefined)}
         onRetryProcessing={actions.onRetryProcessing}
         onOpenSettings={actions.onOpenSettings}
+        retryFeedback={actions.retryFeedback}
         onCloseDetail={vi.fn()}
       />
     </I18nProvider>

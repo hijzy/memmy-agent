@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { GetMemoryOutput, MemoryProcessingRecord, PanelItemsInput, PanelItemsOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
+import { ApiRequestError } from "../../api/http.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import { useTranslation } from "../../i18n/use-translation.js";
 import { AlertTriangle, BrainCircuit, CheckCircle2, ChevronRight, Loader2, RefreshCw, Search, Settings2, Sparkles, X } from "./memory-prototype-icons.js";
@@ -260,7 +261,11 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       throw new Error(t("memory.memories.processing.retryTimeout"));
     } catch (error) {
       if (requestId !== retryRequestIdRef.current) return;
-      setRetryFeedback({ memoryId, status: "error", message: toErrorMessage(error) });
+      setRetryFeedback({
+        memoryId,
+        status: "error",
+        message: processingRetryErrorMessage(error, t("memory.memories.processing.retryEndpointUnavailable"))
+      });
       clearMemoryPanelCache();
       void refresh(page, sourceAgent, { useCache: false }).catch(() => undefined);
       void props.client.getMemory(memoryId).then((data) => {
@@ -618,12 +623,17 @@ function MemoryProcessingFailureCard(props: {
           <dt>{t("memory.memories.processing.stage")}</dt>
           <dd>{processingStageLabel(processing, t)}</dd>
           <dt>{t("memory.memories.processing.reason")}</dt>
-          <dd>{feedback?.status === "error" ? feedback.message : processing.errorMessage || "-"}</dd>
+          <dd>{processing.errorMessage || "-"}</dd>
           <dt>{t("memory.memories.processing.attempts")}</dt>
           <dd>{processing.attemptCount}</dd>
           <dt>{t("memory.memories.processing.failedAt")}</dt>
           <dd>{processing.failedAt ? formatDateTime(processing.failedAt) : "-"}</dd>
         </dl>
+      )}
+      {feedback?.status === "error" && (
+        <p className="memory-processing-failure__retry-error" role="alert">
+          {t("memory.memories.processing.retryError", { message: feedback.message })}
+        </p>
       )}
       <div className="memory-processing-failure__actions">
         {processing?.retryAction === "open_settings" && props.onOpenSettings && !retryDisabled && (
@@ -652,6 +662,12 @@ function MemoryProcessingFailureCard(props: {
       </div>
     </section>
   );
+}
+
+export function processingRetryErrorMessage(error: unknown, endpointUnavailableMessage: string): string {
+  return error instanceof ApiRequestError && error.status === 404 && error.code === null
+    ? endpointUnavailableMessage
+    : toErrorMessage(error);
 }
 
 function processingStageLabel(processing: MemoryProcessingRecord, t: (key: MessageKey) => string): string {

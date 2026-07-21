@@ -232,6 +232,53 @@ describe("MemoryService", () => {
     db.close();
   });
 
+  it("restarts retryable terminal processing failures after model config reload", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-memory-reload-failed-processing-"));
+    roots.push(root);
+    const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      config: DEFAULT_MEMMY_CONFIG,
+      configLoader: () => ({ config: DEFAULT_MEMMY_CONFIG }),
+      llm: createFailingLlm(),
+      embedder: createCapturingEmbedder([])
+    });
+    const namespace = { source: "hermes", profileId: "default", userId: "reload-failure-user" };
+    const added = addAgentSourceImport(service, namespace, "retry after config reload", "reload-failure");
+    await runWorkerRounds(service, 3, 1);
+    expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]?.state).toBe("failed");
+
+    service.reloadConfig({
+      reason: "manual_processing_retry",
+      restartFailedProcessing: false
+    });
+    expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]?.state).toBe("failed");
+
+    service.reloadConfig({ reason: "model_settings_saved" });
+
+    expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]).toMatchObject({
+      state: "summary_pending",
+      stage: "summary",
+      attemptCount: 0,
+      errorCode: null,
+      errorMessage: null,
+      failedAt: null
+    });
+    const jobs = db.db.prepare(
+      `SELECT status, attempts
+       FROM evolution_jobs
+       WHERE target_memory_id = ? AND job_type = 'import_summary'
+       ORDER BY created_at ASC, id ASC`
+    ).all(added.id) as Array<{ status: string; attempts: number }>;
+    expect(jobs).toEqual([
+      { status: "dead_letter", attempts: 3 },
+      { status: "queued", attempts: 0 }
+    ]);
+
+    db.close();
+  });
+
   it("generates semantic ids for future memory writes", () => {
     const { service } = createTestService();
     const namespace = {
@@ -1004,6 +1051,42 @@ describe("MemoryService", () => {
       manualRetryCount: 1
     });
     expect(llmCalls.filter((call) => call.options.operation === "capture.summarize")).toHaveLength(1);
+
+    db.close();
+  });
+
+  it("classifies an HTML model response as a model endpoint configuration failure", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-memory-processing-html-response-"));
+    roots.push(root);
+    const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+    const baseLlm = createFailingLlm();
+    const llm: LlmClient = {
+      ...baseLlm,
+      async completeJson() {
+        throw new Error(
+          "openai_compatible HTTP 200: expected JSON but received HTML instead of a model API response; check the configured model endpoint"
+        );
+      }
+    };
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      llm,
+      embedder: createCapturingEmbedder([])
+    });
+    const namespace = { source: "codex", profileId: "default", userId: "html-response-user" };
+    const added = addAgentSourceImport(service, namespace, "bad model endpoint", "html-response");
+
+    await runWorkerRounds(service, 3, 1);
+
+    expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]).toMatchObject({
+      state: "failed",
+      stage: "summary",
+      attemptCount: 3,
+      retryAction: "open_settings",
+      errorCode: "model_configuration",
+      errorMessage: expect.stringContaining("HTTP 200")
+    });
 
     db.close();
   });
@@ -12237,6 +12320,55 @@ describe("MemoryService", () => {
     db.close();
   });
 
+  it("serves the manual memory-processing retry endpoint", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-memory-http-processing-retry-"));
+    roots.push(root);
+    const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      llm: createFailingLlm(),
+      embedder: createCapturingEmbedder([])
+    });
+    const namespace = { source: "hermes", profileId: "default", userId: "http-retry-user" };
+    const added = addAgentSourceImport(service, namespace, "retry through HTTP", "http-retry");
+    await runWorkerRounds(service, 3, 1);
+    expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]?.state).toBe("failed");
+
+    const server = createMemoryHttpServer({ service });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("expected TCP address");
+    }
+
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/api/v1/memory/${encodeURIComponent(added.id)}/processing/retry`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ namespace })
+      }
+    );
+    const body = await response.json() as {
+      accepted: boolean;
+      processing: { state: string; stage: string | null; manualRetryCount: number };
+    };
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      accepted: true,
+      processing: {
+        state: "summary_pending",
+        stage: "summary",
+        manualRetryCount: 1
+      }
+    });
+
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    db.close();
+  });
+
   it("preserves lifecycle routing fields across the REST boundary", async () => {
     const { db, service } = createTestService();
     const server = createMemoryHttpServer({ service });
@@ -12638,7 +12770,7 @@ describe("MemoryService", () => {
     db.close();
   });
 
-  it("reconciles interrupted and missing processing jobs while preserving terminal failures on startup", async () => {
+  it("reconciles interrupted, missing, and terminally failed processing jobs on startup", async () => {
     const embeddingTexts: string[] = [];
     const { db, service } = createTestService({
       embedder: createCapturingEmbedder(embeddingTexts)
@@ -12706,12 +12838,12 @@ describe("MemoryService", () => {
       server.listen(0, "127.0.0.1", resolve);
     });
 
-    const repairedMemoryIds = [interruptedMemory.id, orphanMemory.id];
+    const repairedMemoryIds = [interruptedMemory.id, failedMemory.id, orphanMemory.id];
     await waitFor(() => {
       const row = db.db.prepare(
         `SELECT COUNT(*) AS count
          FROM memory_vector_entries
-         WHERE memory_id IN (?, ?)
+         WHERE memory_id IN (?, ?, ?)
            AND vector_field = 'vec_summary'`
       ).get(...repairedMemoryIds) as { count: number };
       return row.count === repairedMemoryIds.length;
@@ -12719,12 +12851,16 @@ describe("MemoryService", () => {
 
     expect(repos.runtime.getJob(interruptedJob!.id)?.status).toBe("succeeded");
     expect(repos.processing.get(interruptedMemory.id)?.state).toBe("ready");
+    expect(repos.processing.get(failedMemory.id)?.state).toBe("ready");
     expect(repos.processing.get(orphanMemory.id)?.state).toBe("ready");
-    expect(repos.processing.get(failedMemory.id)).toMatchObject({
-      state: "failed",
-      errorMessage: "previous embedding worker failed"
-    });
-    expect(repos.memories.hasVector(failedMemory.id, "vec_summary")).toBe(false);
+    expect(repos.memories.hasVector(failedMemory.id, "vec_summary")).toBe(true);
+    const failedMemoryJobs = db.db.prepare(
+      `SELECT status
+       FROM evolution_jobs
+       WHERE target_memory_id = ? AND job_type = 'embedding'
+       ORDER BY created_at ASC, id ASC`
+    ).all(failedMemory.id) as Array<{ status: string }>;
+    expect(failedMemoryJobs.map((job) => job.status)).toEqual(["dead_letter", "succeeded"]);
 
     await new Promise<void>((resolve) => server.close(() => resolve()));
     db.close();
