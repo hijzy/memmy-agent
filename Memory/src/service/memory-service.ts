@@ -13531,7 +13531,10 @@ function buildInjectedContext(
     domain: tuning?.domain
   };
   const memoryById = new Map(contextMemories.map((memory) => [memory.id, memory]));
-  const rendered = hits.map((hit) => renderInjectedSection(hit, memoryById.get(hit.id), options));
+  const rendered = hits.flatMap((hit) => {
+    const section = renderInjectedSection(hit, memoryById.get(hit.id), options);
+    return section ? [section] : [];
+  });
   const memories = isStandaloneMathInjected(options)
     ? suppressLowSpecificityStandaloneMathSections(
         suppressIsolatedMathSkillSections(rendered),
@@ -13574,8 +13577,13 @@ function buildInjectedContext(
   };
 }
 
-function renderInjectedSection(hit: RecallHit, memory: MemoryRow | undefined, options: InjectedRenderOptions): RenderedInjectedSection {
+function renderInjectedSection(
+  hit: RecallHit,
+  memory: MemoryRow | undefined,
+  options: InjectedRenderOptions
+): RenderedInjectedSection | null {
   const rendered = renderInjectedSnippet(hit, memory, options);
+  if (!rendered) return null;
   const content = rendered.body;
   return {
     refKind: rendered.refKind,
@@ -13596,7 +13604,7 @@ function renderInjectedSnippet(
   hit: RecallHit,
   memory: MemoryRow | undefined,
   options: InjectedRenderOptions
-): { refKind: InjectedSnippetRefKind; title: string; body: string } {
+): { refKind: InjectedSnippetRefKind; title: string; body: string } | null {
   if (hit.kind === "skill" || hit.memoryLayer === "Skill") {
     const skill = memory ? skillMetaFromMemory(memory) : null;
     const name = skill?.name || hit.title || "Skill";
@@ -13639,6 +13647,7 @@ function renderInjectedSnippet(
 
   if (hit.kind === "trace" || hit.memoryLayer === "L1") {
     const trace = memory ? traceMetaFromMemory(memory) : null;
+    if (!trace) return null;
     return {
       refKind: "trace",
       title: "Trace",
@@ -13705,25 +13714,14 @@ function renderInjectedExperienceUseHint(policy: NonNullable<ReturnType<typeof p
   return "Use as prior successful guidance when the current task matches.";
 }
 
-function renderInjectedTraceBody(hit: RecallHit, trace: TraceMeta | null): string {
-  if (!trace) {
-    return [
-      `id: ${hit.id}`,
-      `timestamp: ${formatInjectedTimestamp(undefined, hit.updatedAt)}`,
-      "",
-      ...labeledInjectedBlock("Content", hit.snippet)
-    ].join("\n");
-  }
-  const reflection = displayReflectionText(trace.reflection);
+function renderInjectedTraceBody(hit: RecallHit, trace: TraceMeta): string {
   return [
     `id: ${hit.id}`,
     `timestamp: ${formatInjectedTimestamp(trace.ts, hit.updatedAt)}`,
-    ...(trace.summary.trim() ? ["", ...labeledInjectedBlock("Summary", trace.summary)] : []),
     "",
     ...labeledInjectedBlock("User", trace.userText || "(empty)"),
     "",
-    ...labeledInjectedBlock("Assistant", trace.agentText || "(empty)"),
-    ...(reflection ? ["", ...labeledInjectedBlock("Reflection", reflection)] : [])
+    ...labeledInjectedBlock("Assistant", trace.agentText || "(empty)")
   ].join("\n");
 }
 
@@ -13750,7 +13748,9 @@ function renderInjectedMarkdown(
   const standaloneMathFinalAnswer = isStandaloneMathInjected(options);
   const taskProtocol = injectedTaskProtocol(options.query);
   if (sections.length === 0 && !guidance && !standaloneMathFinalAnswer && !taskProtocol) return "";
-  const parts: string[] = [injectedHeaderForMode(retrievalMode, standaloneMathFinalAnswer, Boolean(taskProtocol))];
+  const parts: string[] = [];
+  const header = injectedHeaderForMode(retrievalMode, standaloneMathFinalAnswer, Boolean(taskProtocol));
+  if (header) parts.push(header);
   if (taskProtocol) {
     parts.push(taskProtocol);
   } else if (standaloneMathFinalAnswer) {
@@ -13865,11 +13865,7 @@ function injectedHeaderForMode(mode: RetrievalMode, standaloneMathFinalAnswer = 
     return "# Memory search results\n\n" +
       "The memory tool returned candidate methods and prior examples. Verify fit before using them.";
   }
-  if (mode === "turn_start") {
-    return "# Memory context\n\n" +
-      "The memory system recalled historical items that may relate to the current user query.\n" +
-      "Use them only when they are relevant to the current request; ignore unrelated or conflicting memories.";
-  }
+  if (mode === "turn_start") return "";
   if (mode === "skill_invoke") {
     return "# Invoked skill\n\n" +
       "Follow the procedure below; the verification step tells you when you're done.";
@@ -13883,9 +13879,7 @@ function injectedHeaderForMode(mode: RetrievalMode, standaloneMathFinalAnswer = 
       "You have failed this tool multiple times in a row. Below are preferred / avoided actions\n" +
       "distilled from similar past situations. Please adapt your plan accordingly.";
   }
-  return "# Memory context\n\n" +
-    "The memory system recalled the following items for the current user query.\n" +
-    "Use them only when relevant to the current request.";
+  return "";
 }
 
 function isStandaloneMathInjected(options: InjectedRenderOptions): boolean {
@@ -14334,7 +14328,7 @@ function searchCandidateFromHit(hit: RecallHit, memory?: MemoryRow): Record<stri
     refKind: hit.kind,
     refId: hit.id,
     score: hit.score,
-    content: formatted.body,
+    content: formatted?.body ?? "",
     snippet: hit.snippet,
     summary: hit.title,
     origin: hit.source,
