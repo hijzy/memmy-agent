@@ -80,6 +80,7 @@ describe("agent source service", () => {
       discoveredConversations: 1,
       emittedMessages: 2,
       skipped: 0,
+      memoryIds: [],
       errors: []
     });
     expect(repository.listSources()[0]).toMatchObject({
@@ -131,6 +132,7 @@ describe("agent source service", () => {
       discoveredConversations: 1,
       emittedMessages: 2,
       skipped: 0,
+      memoryIds: [],
       errors: [{ conversationId: "scan", reason: "cursor database is corrupt" }]
     });
   });
@@ -328,6 +330,9 @@ describe("agent source service", () => {
             failedMemories: 0,
             memoryIds: [],
             conversations: 1,
+            completedConversationIds: [],
+            incompleteConversationIds: [],
+            failedConversationIds: [],
             errors: []
           };
         }
@@ -349,7 +354,25 @@ describe("agent source service", () => {
         enqueueCalls += 1;
         return {
           enqueued: enqueueCalls === 1 ? 2 : 0,
-          memoryIds: enqueueCalls === 1 ? ["memory-a", "memory-b"] : [],
+          memoryIds: ["memory-a", "memory-b"],
+          serverTime: "2026-05-28T10:00:00.000Z"
+        };
+      },
+      async getMemoryProcessingStatus(memoryIds) {
+        return {
+          items: memoryIds.map((memoryId) => ({
+            memoryId,
+            state: "ready" as const,
+            stage: null,
+            activeJobId: null,
+            attemptCount: 1,
+            manualRetryCount: 0,
+            retryAction: "retry" as const,
+            errorCode: null,
+            errorMessage: null,
+            failedAt: null,
+            updatedAt: "2026-05-28T10:00:00.000Z"
+          })),
           serverTime: "2026-05-28T10:00:00.000Z"
         };
       },
@@ -361,20 +384,175 @@ describe("agent source service", () => {
     const service = createService({ memoryClient });
     const progress: Array<{ current: number; total: number }> = [];
 
-    await service.processImportSummaries({
+    await expect(service.processImportSummaries(["memory-a", "memory-b"], {
       progressSourceId: "hermes",
       onProgress(event) {
         if (event.phase === "summarize") {
           progress.push({ current: event.current, total: event.total });
         }
       }
-    });
+    })).resolves.toEqual([]);
 
     expect(workerTargets).toEqual([["memory-a", "memory-b"]]);
     expect(progress).toEqual([
       { current: 0, total: 2 },
       { current: 2, total: 2 }
     ]);
+  });
+
+  it("finishes an empty owned-memory batch without starting the worker", async () => {
+    const baseMemoryClient = createMockMemoryClient();
+    const enqueued: string[][] = [];
+    let workerCalls = 0;
+    const service = createService({
+      memoryClient: {
+        ...baseMemoryClient,
+        async enqueueImportSummaries(memoryIds) {
+          enqueued.push([...memoryIds]);
+          return { enqueued: 0, memoryIds: [], serverTime: "2026-05-28T10:00:00.000Z" };
+        },
+        async runWorker(input) {
+          workerCalls += 1;
+          return baseMemoryClient.runWorker(input);
+        }
+      }
+    });
+    const progress: Array<{ current: number; total: number }> = [];
+
+    await expect(service.processImportSummaries([], {
+      progressSourceId: "hermes",
+      onProgress(event) {
+        if (event.phase === "summarize") progress.push({ current: event.current, total: event.total });
+      }
+    })).resolves.toEqual([]);
+
+    expect(enqueued).toEqual([[]]);
+    expect(workerCalls).toBe(0);
+    expect(progress).toEqual([{ current: 0, total: 0 }]);
+  });
+
+  it("treats a terminal processing failure as completed progress and reports its reason", async () => {
+    const baseMemoryClient = createMockMemoryClient();
+    const service = createService({
+      memoryClient: {
+        ...baseMemoryClient,
+        async getMemoryProcessingStatus() {
+          return {
+            items: [{
+              memoryId: "memory-failed",
+              state: "failed" as const,
+              stage: "embedding" as const,
+              activeJobId: null,
+              attemptCount: 6,
+              manualRetryCount: 0,
+              retryAction: "retry" as const,
+              errorCode: "embedding_failed",
+              errorMessage: "embedding provider unavailable",
+              failedAt: "2026-05-28T10:00:00.000Z",
+              updatedAt: "2026-05-28T10:00:00.000Z"
+            }],
+            serverTime: "2026-05-28T10:00:00.000Z"
+          };
+        }
+      }
+    });
+    const progress: Array<{ current: number; total: number }> = [];
+
+    await expect(service.processImportSummaries(["memory-failed"], {
+      progressSourceId: "hermes",
+      onProgress(event) {
+        if (event.phase === "summarize") progress.push({ current: event.current, total: event.total });
+      }
+    })).resolves.toEqual([{
+      memoryId: "memory-failed",
+      reason: "embedding provider unavailable"
+    }]);
+    expect(progress).toEqual([
+      { current: 0, total: 1 },
+      { current: 1, total: 1 }
+    ]);
+  });
+
+  it("checkpoints only completed conversations and does not advance the global cursor on partial failure", async () => {
+    const repository = createRepository();
+    repository.upsertSource({
+      sourceId: "cursor",
+      displayName: "Cursor",
+      dataPath: "/tmp/cursor",
+      builtin: true
+    });
+    const service = createService({
+      repository,
+      ingestionService: {
+        async ingest() {
+          return {
+            attempted: 3,
+            written: 1,
+            deduped: 1,
+            failed: 1,
+            writtenMemories: 1,
+            dedupedMemories: 0,
+            failedMemories: 1,
+            memoryIds: ["memory-complete"],
+            conversations: 3,
+            completedConversationIds: ["conversation-complete"],
+            incompleteConversationIds: ["conversation-incomplete"],
+            failedConversationIds: ["conversation-failed"],
+            errors: [{ conversationId: "conversation-failed", reason: "write failed" }]
+          };
+        }
+      }
+    });
+    const messages = [
+      { ...createMessage("cursor", 1), conversationId: "conversation-complete", messageId: "complete-1" },
+      { ...createMessage("cursor", 2), conversationId: "conversation-incomplete", messageId: "incomplete-1" },
+      { ...createMessage("cursor", 3), conversationId: "conversation-failed", messageId: "failed-1" }
+    ];
+
+    const [result] = await service.ingestCollected([{
+      sourceId: "cursor",
+      scanMode: "incremental",
+      scanStartedAt: "2026-05-28T09:00:00.000Z",
+      conversationIds: messages.map((message) => message.conversationId),
+      messages,
+      errors: []
+    }]);
+
+    expect(result).toMatchObject({
+      memoryIds: ["memory-complete"],
+      errors: [{ conversationId: "conversation-failed", reason: "write failed" }]
+    });
+    expect(repository.getConversationCheckpoint("cursor", "conversation-complete")).toMatchObject({
+      lastMessageId: "complete-1"
+    });
+    expect(repository.getConversationCheckpoint("cursor", "conversation-incomplete")).toBeNull();
+    expect(repository.getConversationCheckpoint("cursor", "conversation-failed")).toBeNull();
+    expect(repository.getScanWatermark("cursor")).toBeNull();
+  });
+
+  it("rescans a conversation when its content changes without changing the message cursor", async () => {
+    const repository = createRepository();
+    let messages = createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:02.000Z");
+    const service = createService({
+      repository,
+      adapters: [createFakeAdapter("cursor", [], async function* () {
+        for (const message of messages) yield message;
+      })]
+    });
+
+    await service.scanOne("cursor");
+    messages = messages.map((message) => message.role === "assistant"
+      ? { ...message, content: "revised answer with the same id and timestamp" }
+      : message);
+
+    const revised = await service.collectOne("cursor");
+    expect(revised.messages.map((message) => message.content)).toContain(
+      "revised answer with the same id and timestamp"
+    );
+
+    await service.ingestCollected([revised]);
+    const unchanged = await service.collectOne("cursor");
+    expect(unchanged.messages).toEqual([]);
   });
 
   it("groups messages by conversation before handing them to ingestion", async () => {
@@ -405,6 +583,9 @@ describe("agent source service", () => {
             failedMemories: 0,
             memoryIds: [],
             conversations: 2,
+            completedConversationIds: [],
+            incompleteConversationIds: [],
+            failedConversationIds: [],
             errors: []
           };
         }
@@ -629,6 +810,18 @@ function createRepository(): AgentSourceRepository {
       PRIMARY KEY (uuid, source_id),
       FOREIGN KEY (uuid, source_id) REFERENCES account_agent_sources(uuid, source_id) ON DELETE CASCADE
     );
+    CREATE TABLE account_agent_source_conversation_checkpoints (
+      uuid            TEXT NOT NULL REFERENCES cloud_accounts(uuid) ON DELETE CASCADE,
+      source_id       TEXT NOT NULL,
+      conversation_id TEXT NOT NULL,
+      last_message_id TEXT NOT NULL,
+      last_created_at TEXT NOT NULL,
+      content_hash    TEXT NOT NULL,
+      created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (uuid, source_id, conversation_id),
+      FOREIGN KEY (uuid, source_id) REFERENCES account_agent_sources(uuid, source_id) ON DELETE CASCADE
+    );
     INSERT INTO cloud_accounts (uuid) VALUES ('cloud-account-a');
   `);
 
@@ -663,8 +856,10 @@ function createFakeIngestionService(): IngestionService {
   return {
     async ingest(messages) {
       let attempted = 0;
-      for await (const _message of messages) {
+      const conversationIds = new Set<string>();
+      for await (const message of messages) {
         attempted += 1;
+        conversationIds.add(message.conversationId);
       }
 
       return {
@@ -677,6 +872,9 @@ function createFakeIngestionService(): IngestionService {
         failedMemories: 0,
         memoryIds: [],
         conversations: 1,
+        completedConversationIds: [...conversationIds],
+        incompleteConversationIds: [],
+        failedConversationIds: [],
         errors: []
       };
     }

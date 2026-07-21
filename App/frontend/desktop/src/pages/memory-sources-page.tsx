@@ -1235,7 +1235,7 @@ export function resolveAgentSourceScanButtonState(
   scanTargetSourceId: string | null,
   recentlyCompletedSourceIds: ReadonlySet<string>
 ): AgentSourceScanButtonState {
-  if (isScanning && (scanTargetSourceId === "all" || scanTargetSourceId === sourceId)) {
+  if (isScanning && scanTargetSourceId === sourceId) {
     return "running";
   }
   return recentlyCompletedSourceIds.has(sourceId) ? "completed" : "idle";

@@ -29,6 +29,7 @@ export interface AgentSourcesState {
   error: string | null;
   scanProgress: AgentSourceScanProgress | null;
   lastFinishedScanJobId: string | null;
+  finishedScanJobIds: string[];
   recentScanCompletions: AgentSourceScanCompletion[];
   scanPreferences: ScanPreferences;
 }
@@ -116,6 +117,7 @@ export function createInitialAppState(): AppState {
       error: null,
       scanProgress: null,
       lastFinishedScanJobId: null,
+      finishedScanJobIds: [],
       recentScanCompletions: [],
       scanPreferences: defaultScanPreferences
     },
@@ -248,7 +250,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         agentSources: { ...state.agentSources, isScanning: true, activeScanSourceId: action.sourceId, error: null, scanProgress: null }
       };
     case "agentSources/scanProgress":
-      if (state.agentSources.lastFinishedScanJobId === action.progress.jobId) {
+      if (state.agentSources.finishedScanJobIds.includes(action.progress.jobId)) {
         return state;
       }
       if (
@@ -279,7 +281,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           error: null,
           scanProgress: null,
           lastFinishedScanJobId: action.scan?.jobId ?? state.agentSources.lastFinishedScanJobId,
-          recentScanCompletions: action.scan?.succeeded
+          finishedScanJobIds: action.scan
+            ? [...state.agentSources.finishedScanJobIds.filter((jobId) => jobId !== action.scan?.jobId), action.scan.jobId].slice(-20)
+            : state.agentSources.finishedScanJobIds,
+          recentScanCompletions: action.scan
             ? [
                 ...state.agentSources.recentScanCompletions.filter((item) => item.sourceId !== action.scan?.sourceId),
                 { jobId: action.scan.jobId, sourceId: action.scan.sourceId }

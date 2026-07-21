@@ -283,7 +283,7 @@ describe("agent sources local api routes", () => {
           return [];
         },
         async processImportSummaries() {
-          return undefined;
+          return [];
         }
       }
     });
@@ -320,8 +320,9 @@ describe("agent sources local api routes", () => {
           calls.push(`ingest:${collected.map((source) => source.sourceId).join(",")}`);
           return collected.map(toScanResult);
         },
-        async processImportSummaries(options) {
+        async processImportSummaries(_memoryIds, options) {
           calls.push(`summarize:${options?.progressSourceId ?? "all"}`);
+          return [];
         }
       }
     });
@@ -365,7 +366,7 @@ describe("agent sources local api routes", () => {
           return [];
         },
         async processImportSummaries() {
-          return undefined;
+          return [];
         }
       }
     });
@@ -436,7 +437,7 @@ describe("agent sources local api routes", () => {
           return collected.map(toScanResult);
         },
         async processImportSummaries() {
-          return undefined;
+          return [];
         }
       }
     });
@@ -518,7 +519,7 @@ describe("agent sources local api routes", () => {
           return collected.map(toScanResult);
         },
         async processImportSummaries() {
-          return undefined;
+          return [];
         }
       }
     });
@@ -575,7 +576,7 @@ describe("agent sources local api routes", () => {
           return [];
         },
         async processImportSummaries() {
-          return undefined;
+          return [];
         }
       }
     });
@@ -642,7 +643,7 @@ describe("agent sources local api routes", () => {
           return [];
         },
         async processImportSummaries() {
-          return undefined;
+          return [];
         }
       }
     });
@@ -702,7 +703,7 @@ describe("agent sources local api routes", () => {
           return collected.map(toScanResult);
         },
         async processImportSummaries() {
-          return undefined;
+          return [];
         }
       }
     });
@@ -815,7 +816,7 @@ function createFakeAgentSourceService(): AgentSourceService {
   }
 
   async function processImportSummaries() {
-    return undefined;
+    return [];
   }
 
   return {

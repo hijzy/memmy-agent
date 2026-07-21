@@ -26,6 +26,8 @@ export const API_ROUTES = [
   "POST /api/v1/turns/:turnId/complete",
   "POST /api/v1/memory/search",
   "POST /api/v1/memory/add",
+  "POST /api/v1/memory/processing/status",
+  "POST /api/v1/memory/:id/processing/retry",
   "GET /api/v1/memory/:id",
   "DELETE /api/v1/memory/:id",
   "POST /api/v1/worker/run",
@@ -42,6 +44,8 @@ export interface MemoryHttpServerOptions {
   service: MemoryService;
   apiKey?: string;
   auth?: MemoryHttpAuthOptions;
+  workerStartupFallbackMs?: number;
+  workerPostHealthDelayMs?: number;
 }
 
 export interface MemoryHttpAuthOptions {
@@ -64,12 +68,19 @@ interface AuthPrincipal {
 
 interface AutoWorkerDrain {
   start(): void;
+  afterHealthCheck(): void;
   schedule(): void;
   dispose(): void;
 }
 
+const DEFAULT_WORKER_STARTUP_FALLBACK_MS = 5_000;
+const DEFAULT_WORKER_POST_HEALTH_DELAY_MS = 250;
+
 export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server {
-  const autoWorker = createAutoWorkerDrain(options.service);
+  const autoWorker = createAutoWorkerDrain(options.service, {
+    startupFallbackMs: options.workerStartupFallbackMs ?? DEFAULT_WORKER_STARTUP_FALLBACK_MS,
+    postHealthDelayMs: options.workerPostHealthDelayMs ?? DEFAULT_WORKER_POST_HEALTH_DELAY_MS
+  });
   const server = createServer(async (request, response) => {
     setCors(response);
     if (request.method === "OPTIONS") {
@@ -83,6 +94,9 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         throw new MemoryServiceError("invalid_argument", "missing request url or method");
       }
       const url = new URL(request.url, "http://127.0.0.1");
+      if (request.method === "GET" && url.pathname === "/api/v1/health") {
+        response.once("finish", () => autoWorker.afterHealthCheck());
+      }
       if (request.method === "GET" && isViewerPath(url.pathname)) {
         writeHtml(response, memoryPanelHtml());
         return;
@@ -124,11 +138,20 @@ export async function listenMemoryHttpServer(options: MemoryHttpServerOptions & 
   };
 }
 
-function createAutoWorkerDrain(service: MemoryService): AutoWorkerDrain {
+function createAutoWorkerDrain(
+  service: MemoryService,
+  options: {
+    startupFallbackMs: number;
+    postHealthDelayMs: number;
+  }
+): AutoWorkerDrain {
   let running = false;
   let requested = false;
   let scheduled = false;
   let disposed = false;
+  let startupReleased = false;
+  let startupReconciled = false;
+  let startupTimer: ReturnType<typeof setTimeout> | undefined;
   let delayedTimer: ReturnType<typeof setTimeout> | undefined;
   const maxCycles = 40;
   const priorityJobLimit = 100;
@@ -146,6 +169,14 @@ function createAutoWorkerDrain(service: MemoryService): AutoWorkerDrain {
     running = true;
     let continueSoon = false;
     try {
+      if (!startupReconciled) {
+        startupReconciled = true;
+        try {
+          service.reconcileWorkerStartup();
+        } catch (error) {
+          console.error("[memmy] worker startup reconciliation failed", error);
+        }
+      }
       do {
         requested = false;
         let prioritySummariesDuringDrain = 0;
@@ -161,6 +192,7 @@ function createAutoWorkerDrain(service: MemoryService): AutoWorkerDrain {
           if (cycle === maxCycles - 1) {
             continueSoon = true;
           }
+          await yieldToEventLoop();
         }
       } while (requested && !continueSoon);
     } catch (error) {
@@ -203,7 +235,12 @@ function createAutoWorkerDrain(service: MemoryService): AutoWorkerDrain {
     if (disposed) {
       return;
     }
+    startupReleased = true;
     requested = true;
+    if (startupTimer) {
+      clearTimeout(startupTimer);
+      startupTimer = undefined;
+    }
     if (delayedTimer) {
       clearTimeout(delayedTimer);
       delayedTimer = undefined;
@@ -220,23 +257,44 @@ function createAutoWorkerDrain(service: MemoryService): AutoWorkerDrain {
 
   return {
     start(): void {
-      try {
-        service.reconcileWorkerStartup();
-      } catch (error) {
-        console.error("[memmy] worker startup reconciliation failed", error);
+      if (disposed || startupReleased || startupTimer) {
+        return;
       }
-      schedule();
+      startupTimer = setTimeout(() => {
+        startupTimer = undefined;
+        schedule();
+      }, Math.max(0, options.startupFallbackMs));
+    },
+    afterHealthCheck(): void {
+      if (disposed || startupReleased) {
+        return;
+      }
+      if (startupTimer) {
+        clearTimeout(startupTimer);
+      }
+      startupTimer = setTimeout(() => {
+        startupTimer = undefined;
+        schedule();
+      }, Math.max(0, options.postHealthDelayMs));
     },
     schedule,
     dispose(): void {
       disposed = true;
       requested = false;
+      if (startupTimer) {
+        clearTimeout(startupTimer);
+        startupTimer = undefined;
+      }
       if (delayedTimer) {
         clearTimeout(delayedTimer);
         delayedTimer = undefined;
       }
     }
   };
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 function nextWorkerRunAfterDelayMs(service: MemoryService): number | undefined {
@@ -403,7 +461,12 @@ async function routeRequest(
 
   if (method === "POST" && path === "/api/v1/worker/import-summaries/enqueue") {
     requireMemoryWrite(principal);
-    const result = service.enqueuePendingImportSummaries();
+    const request = asObject(body, "worker.import-summaries.enqueue") as { memoryIds?: unknown };
+    const memoryIds = parseOptionalStringArray(
+      request.memoryIds,
+      "worker.import-summaries.enqueue.memoryIds"
+    );
+    const result = service.enqueuePendingImportSummaries(10_000, memoryIds);
     if (result.enqueued > 0) {
       autoWorker.schedule();
     }
@@ -470,6 +533,33 @@ async function routeRequest(
       limit: parseNumber(url.searchParams.get("limit")),
       offset: parseNumber(url.searchParams.get("offset"))
     });
+  }
+
+  if (method === "POST" && path === "/api/v1/memory/processing/status") {
+    requireMemoryRead(principal);
+    const request = envelopeWithPrincipal(
+      asObject(body, "memory.processing.status"),
+      principal
+    ) as RequestEnvelope & { memoryIds?: unknown };
+    return service.memoryProcessingStatus(
+      parseOptionalStringArray(request.memoryIds, "memory.processing.status.memoryIds") ?? [],
+      request
+    );
+  }
+
+  const memoryProcessingRetry = match(path, /^\/api\/v1\/memory\/([^/]+)\/processing\/retry$/);
+  if (method === "POST" && memoryProcessingRetry) {
+    requireMemoryWrite(principal);
+    const request = envelopeWithPrincipal(
+      asObject(body, "memory.processing.retry"),
+      principal
+    ) as RequestEnvelope;
+    const result = service.retryMemoryProcessing(
+      decodeMatchSegment(memoryProcessingRetry, 1),
+      request
+    );
+    if (result.accepted) autoWorker.schedule();
+    return result;
   }
 
   const memoryGet = match(path, /^\/api\/v1\/memory\/([^/]+)$/);

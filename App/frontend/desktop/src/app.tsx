@@ -75,6 +75,34 @@ function RuntimeApp() {
     let isActive = true;
     const scanCompletionTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
+    function scheduleScanCompletionExpiry(jobId: string) {
+      const existingTimeout = scanCompletionTimeouts.get(jobId);
+      if (existingTimeout) clearTimeout(existingTimeout);
+      scanCompletionTimeouts.set(jobId, setTimeout(() => {
+        scanCompletionTimeouts.delete(jobId);
+        dispatch(appActions.agentSourceScanCompletionExpired(jobId));
+      }, AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS));
+    }
+
+    async function reconcileAgentSourceScanStatus(agentSourceClient: ReturnType<typeof createAppClients>["agentSources"]) {
+      try {
+        const status = await agentSourceClient.getScanStatus();
+        if (!isActive) return;
+        if (status.progress) {
+          dispatch(appActions.agentSourceScanProgressReceived(status.progress));
+          return;
+        }
+        if (status.completion) {
+          dispatch(appActions.agentSourceScanCompleted(status.completion));
+          scheduleScanCompletionExpiry(status.completion.jobId);
+          return;
+        }
+        dispatch(appActions.agentSourceScanCompleted());
+      } catch {
+        // The next heartbeat or reconnect will reconcile again.
+      }
+    }
+
     /** Handles boot. */
     async function boot() {
       dispatch(appActions.startupLoading());
@@ -139,6 +167,9 @@ function RuntimeApp() {
         dispatch(appActions.agentSourcesLoaded(sources));
         if (scanStatus.progress) {
           dispatch(appActions.agentSourceScanProgressReceived(scanStatus.progress));
+        } else if (scanStatus.completion) {
+          dispatch(appActions.agentSourceScanCompleted(scanStatus.completion));
+          scheduleScanCompletionExpiry(scanStatus.completion.jobId);
         }
         if (accountSession.authenticated) {
           dispatch(appActions.accountUpdated({
@@ -158,7 +189,10 @@ function RuntimeApp() {
         dispatch(appActions.eventStatusChanged("connecting"));
 
         events = createEventsConnection(runtimeConfig);
-        events.addEventListener("app.connected", () => dispatch(appActions.eventStatusChanged("connected")));
+        events.addEventListener("app.connected", () => {
+          dispatch(appActions.eventStatusChanged("connected"));
+          void reconcileAgentSourceScanStatus(clients.agentSources);
+        });
         events.addEventListener("app.heartbeat", () => dispatch(appActions.eventStatusChanged("heartbeat")));
         events.addEventListener("agent_source.scan_progress", (event) => {
           const parsed = parseSseEvent(event);
@@ -175,16 +209,7 @@ function RuntimeApp() {
           const scanSucceeded = scanResults.every((result) => result.errors.length === 0);
           clearMemoryPanelCache();
           dispatch(appActions.agentSourceScanCompleted({ jobId, sourceId, succeeded: scanSucceeded }));
-          if (scanSucceeded) {
-            const existingTimeout = scanCompletionTimeouts.get(jobId);
-            if (existingTimeout) {
-              clearTimeout(existingTimeout);
-            }
-            scanCompletionTimeouts.set(jobId, setTimeout(() => {
-              scanCompletionTimeouts.delete(jobId);
-              dispatch(appActions.agentSourceScanCompletionExpired(jobId));
-            }, AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS));
-          }
+          scheduleScanCompletionExpiry(jobId);
           void clients.agentSources
             .listSources()
             .then((nextSources) => {

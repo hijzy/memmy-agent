@@ -181,14 +181,23 @@ describe("app reducer", () => {
     const expiredState = appReducer(loadedState, appActions.agentSourceScanCompletionExpired("job-1"));
     expect(expiredState.agentSources.recentScanCompletions).toEqual([]);
 
-    const staleProgressState = appReducer(expiredState, appActions.agentSourceScanProgressReceived({
+    const failedButFinishedState = appReducer(expiredState, appActions.agentSourceScanCompleted({
+      jobId: "job-2",
+      sourceId: "hermes",
+      succeeded: false
+    }));
+    expect(failedButFinishedState.agentSources.recentScanCompletions).toEqual([
+      { jobId: "job-2", sourceId: "hermes" }
+    ]);
+
+    const staleProgressState = appReducer(failedButFinishedState, appActions.agentSourceScanProgressReceived({
       jobId: "job-1",
       sourceId: "cursor",
       phase: "scan",
       current: 0,
       total: 0
     }));
-    expect(staleProgressState).toBe(expiredState);
+    expect(staleProgressState).toBe(failedButFinishedState);
   });
 
   it("ignores stale scan progress for a stopped job", () => {
