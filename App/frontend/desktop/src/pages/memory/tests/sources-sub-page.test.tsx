@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { ApiRequestError } from "../../../api/http.js";
 import { AppProviders } from "../../../app/providers.js";
 import { enUSMessages, zhCNMessages } from "../../../i18n/messages.js";
+import { AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS } from "../../../state/app-actions.js";
 import { agentSourceLogoUrl } from "../../agent-source-logos.js";
 import {
   formatAgentSourceActionError,
@@ -13,6 +14,7 @@ import {
   formatSourceDataPath,
   formatSourceMemoryCount,
   isAgentSourceConnectionActionDisabled,
+  resolveAgentSourceScanButtonState,
   resolveAgentSourceConnectionAction,
   resolveAgentSourceStatusLabelKey,
   resolveScanContinueSourceId
@@ -29,6 +31,16 @@ describe("SourcesSubPage", () => {
     expect(enUSMessages["memory.hookNotInstalled"]).toBe("Hook not installed");
     expect(enUSMessages["memory.installHook"]).toBe("Install Hook");
     expect(enUSMessages["memory.removeHook"]).toBe("Remove Hook");
+  });
+
+  it("同步按钮在扫描中旋转，完成后进入不可重复点击的勾选状态", () => {
+    expect(resolveAgentSourceScanButtonState("hermes", true, "hermes", new Set())).toBe("running");
+    expect(resolveAgentSourceScanButtonState("hermes", true, "cursor", new Set())).toBe("idle");
+    expect(resolveAgentSourceScanButtonState("hermes", false, null, new Set(["hermes"]))).toBe("completed");
+    expect(resolveAgentSourceScanButtonState("hermes", false, null, new Set())).toBe("idle");
+    expect(zhCNMessages["memory.syncCompleted"]).toBe("同步完成");
+    expect(enUSMessages["memory.syncCompleted"]).toBe("Synced");
+    expect(AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS).toBe(5000);
   });
 
   it("使用 WorkBuddy 官方图标而不是文字缩写", () => {

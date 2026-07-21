@@ -4556,7 +4556,7 @@ export class MemoryService {
 
     return {
       enqueued: memories.length,
-      memoryIds: memories.map((memory) => memory.id),
+      memoryIds: this.repos.memories.listUnprocessedAgentSourceImports(limit).map((memory) => memory.id),
       serverTime: nowIso()
     };
   }
@@ -4623,7 +4623,7 @@ export class MemoryService {
     };
   }
 
-  async runWorkerOnce(limit = 100, request: RequestEnvelope = {}): Promise<{
+  async runWorkerOnce(limit = 100, request: RequestEnvelope & { targetMemoryIds?: string[] } = {}): Promise<{
     leased: number;
     succeeded: number;
     failed: number;
@@ -4637,15 +4637,20 @@ export class MemoryService {
       return this.runWorkerNoWrite(request);
     }
     const normalizedLimit = Math.max(1, Math.floor(limit));
-    const embeddingRetries = await this.runEmbeddingRetryOnce(normalizedLimit);
+    const targetMemoryIds = request.targetMemoryIds;
+    const embeddingRetries = await this.runEmbeddingRetryOnce(normalizedLimit, targetMemoryIds);
     const requeuedJobs = this.repos.runtime.requeueFailedJobs(
-      Math.max(0, normalizedLimit - embeddingRetries.leased)
+      Math.max(0, normalizedLimit - embeddingRetries.leased),
+      nowIso(),
+      targetMemoryIds
     );
     for (const { before, after } of requeuedJobs) {
       this.appendJobChange(after, "queued", before);
     }
     const jobs = this.repos.runtime.leaseQueuedJobs(
-      Math.max(0, normalizedLimit - embeddingRetries.leased)
+      Math.max(0, normalizedLimit - embeddingRetries.leased),
+      60,
+      targetMemoryIds
     );
     const results: WorkerJobRunResult[] = [];
     for (let index = 0; index < jobs.length;) {
@@ -4786,13 +4791,17 @@ export class MemoryService {
     };
   }
 
-  private async runEmbeddingRetryOnce(limit: number): Promise<EmbeddingRetryRunSummary> {
+  private async runEmbeddingRetryOnce(
+    limit: number,
+    targetMemoryIds?: readonly string[]
+  ): Promise<EmbeddingRetryRunSummary> {
     const now = Date.now();
     const retries = this.repos.runtime.claimDueEmbeddingRetries({
       now,
       workerId: this.embeddingRetryWorkerId,
       leaseUntil: now + EMBEDDING_RETRY_LEASE_MS,
-      limit
+      limit,
+      targetMemoryIds
     });
     const results: Array<{ succeeded: number; failed: number; item: EmbeddingRetryRunSummary["items"][number] | null }> = [];
     const claimed: Array<{
@@ -6047,7 +6056,7 @@ export class MemoryService {
       return;
     }
 
-    const summary = this.llm.isConfigured()
+    const generatedSummary = this.llm.isConfigured()
       ? await this.summarizeTraceForCapture({
         trace,
         userText: trace.userText,
@@ -6056,6 +6065,7 @@ export class MemoryService {
         reflectionText: ""
       })
       : fallbackImportSummary(trace, memory);
+    const summary = firstRealSummary(generatedSummary) ?? fallbackImportSummary(trace, memory);
     const at = nowIso();
     const previous = memory;
     const next = updateImportPipelineStatus(updateTraceImportSummary(memory, {
@@ -15472,11 +15482,11 @@ function firstLine(value: string): string {
 }
 
 function fallbackImportSummary(trace: TraceMeta, memory: MemoryRow): string {
-  const visibleText = [trace.userText, trace.agentText]
-    .filter((value) => value.trim().length > 0)
-    .join("\n");
   const title = stringFromRecord(memory.info, "title");
-  return clip(firstLine(visibleText) || title || "导入记忆", 200);
+  const summary = [trace.userText, trace.agentText, title]
+    .map((value) => firstLine(value ?? ""))
+    .find((value) => value && !isImportSummaryPlaceholder(value));
+  return clip(summary || "导入记忆", 200);
 }
 
 function fallbackTraceSummary(trace: TraceMeta): string {

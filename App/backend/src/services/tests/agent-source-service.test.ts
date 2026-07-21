@@ -8,6 +8,7 @@ import type {
   SourceAdapter,
   SourceDescriptor
 } from "../../adapters/outbound/agent-source/types.js";
+import type { MemoryClient } from "../../adapters/outbound/memory-client/index.js";
 import { createAgentSourceRepository, type AgentSourceRepository } from "../../infrastructure/agent-source-store/index.js";
 import { createMockMemoryClient } from "../../tests/support/mock-memory-client.js";
 import type { IngestionService } from "../ingestion-service.js";
@@ -338,6 +339,44 @@ describe("agent source service", () => {
     expect(events).toEqual(["scan:cursor", "scan:custom", "ingest:cursor", "ingest:custom"]);
   });
 
+  it("reconciles summary progress when another worker finishes the scan memories", async () => {
+    const baseMemoryClient = createMockMemoryClient();
+    const workerTargets: string[][] = [];
+    let enqueueCalls = 0;
+    const memoryClient: MemoryClient = {
+      ...baseMemoryClient,
+      async enqueueImportSummaries() {
+        enqueueCalls += 1;
+        return {
+          enqueued: enqueueCalls === 1 ? 2 : 0,
+          memoryIds: enqueueCalls === 1 ? ["memory-a", "memory-b"] : [],
+          serverTime: "2026-05-28T10:00:00.000Z"
+        };
+      },
+      async runWorker(input) {
+        workerTargets.push(input.targetMemoryIds ?? []);
+        return baseMemoryClient.runWorker(input);
+      }
+    };
+    const service = createService({ memoryClient });
+    const progress: Array<{ current: number; total: number }> = [];
+
+    await service.processImportSummaries({
+      progressSourceId: "hermes",
+      onProgress(event) {
+        if (event.phase === "summarize") {
+          progress.push({ current: event.current, total: event.total });
+        }
+      }
+    });
+
+    expect(workerTargets).toEqual([["memory-a", "memory-b"]]);
+    expect(progress).toEqual([
+      { current: 0, total: 2 },
+      { current: 2, total: 2 }
+    ]);
+  });
+
   it("groups messages by conversation before handing them to ingestion", async () => {
     const ingestedOrder: string[] = [];
     const repository = createRepository();
@@ -522,13 +561,14 @@ function createService(
     adapters?: readonly SourceAdapter[];
     ingestionService?: IngestionService;
     skillDistributionService?: SkillDistributionService;
+    memoryClient?: MemoryClient;
   } = {}
 ): AgentSourceService {
   return createAgentSourceService({
     sourceRegistry: createSourceRegistry(options.adapters ?? [createFakeAdapter("cursor")]),
     agentSourceRepository: options.repository ?? createRepository(),
     ingestionService: options.ingestionService ?? createFakeIngestionService(),
-    memoryClient: createMockMemoryClient(),
+    memoryClient: options.memoryClient ?? createMockMemoryClient(),
     skillDistributionService:
       options.skillDistributionService ??
       ({

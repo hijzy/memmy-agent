@@ -1046,6 +1046,7 @@ export const ScanCompletedSseEventSchema = z.object({
     timestamp: z.string().datetime(),
     payload: z.object({
         jobId: z.string().min(1),
+        sourceId: z.string().min(1),
         results: z.array(ScanResultSchema)
     })
 });

@@ -861,6 +861,66 @@ describe("MemoryService", () => {
     db.close();
   });
 
+  it("falls back to visible import text when summary generation fails", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-memory-import-summary-fallback-"));
+    roots.push(root);
+    const db = new MemoryDb({
+      path: join(root, "memory.sqlite")
+    });
+    const embeddingTexts: string[] = [];
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      llm: createFailingLlm(),
+      embedder: createCapturingEmbedder(embeddingTexts)
+    });
+    const namespace = {
+      source: "hermes",
+      profileId: "default",
+      userId: "user-import-summary-fallback"
+    };
+    const added = addAgentSourceImport(
+      service,
+      namespace,
+      "请列出项目里的异常类型。",
+      "summary-fallback"
+    );
+
+    const summaryRun = await service.runWorkerOnce(100);
+    const embeddingRun = await service.runWorkerOnce(100);
+
+    expect(summaryRun.jobs.map((job) => job.jobType)).toEqual(["import_summary"]);
+    expect(embeddingRun.jobs.map((job) => job.jobType)).toEqual(["embedding"]);
+    expect(embeddingTexts[0]).toContain("Summary: 请列出项目里的异常类型。");
+    expect(service.enqueuePendingImportSummaries().memoryIds).toEqual([]);
+    const stored = db.db.prepare(
+      `SELECT properties_json
+       FROM memories
+       WHERE id = ?`
+    ).get(added.id) as { properties_json: string };
+    const properties = JSON.parse(stored.properties_json) as {
+      internal_info: {
+        import_pipeline: { status: string };
+        trace: { summary: string };
+      };
+    };
+    expect(properties.internal_info.trace.summary).toBe("请列出项目里的异常类型。");
+    expect(properties.internal_info.import_pipeline.status).toBe("indexed");
+    const jobCounts = db.db.prepare(
+      `SELECT job_type, COUNT(*) AS count
+       FROM evolution_jobs
+       WHERE target_memory_id = ?
+       GROUP BY job_type
+       ORDER BY job_type`
+    ).all(added.id) as Array<{ job_type: string; count: number }>;
+    expect(jobCounts).toEqual([
+      { job_type: "embedding", count: 1 },
+      { job_type: "import_summary", count: 1 }
+    ]);
+
+    db.close();
+  });
+
   it("keeps Codex import tool payloads as bounded text", () => {
     const { db, service } = createTestService();
     const deepJsonText = `${"{\"a\":".repeat(80)}0${"}".repeat(80)}`;
@@ -1067,7 +1127,7 @@ describe("MemoryService", () => {
     db.close();
   });
 
-  it("defers agent source import summaries until the scan summary stage enqueues them", () => {
+  it("defers agent source import summaries until the scan summary stage enqueues them", async () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-memory-import-defer-"));
     roots.push(root);
     const db = new MemoryDb({
@@ -1110,6 +1170,10 @@ describe("MemoryService", () => {
       enqueued: 1,
       memoryIds: [added.id]
     });
+    expect(service.enqueuePendingImportSummaries()).toMatchObject({
+      enqueued: 0,
+      memoryIds: [added.id]
+    });
     const jobsAfter = db.db.prepare(
       `SELECT job_type, status, target_memory_id
        FROM evolution_jobs
@@ -1118,6 +1182,37 @@ describe("MemoryService", () => {
     expect(jobsAfter).toEqual([
       { job_type: "import_summary", status: "queued", target_memory_id: added.id }
     ]);
+
+    await service.runWorkerOnce(100);
+    await service.runWorkerOnce(100);
+    expect(service.enqueuePendingImportSummaries()).toMatchObject({
+      enqueued: 0,
+      memoryIds: []
+    });
+
+    db.close();
+  });
+
+  it("limits worker runs to the imported memories requested by a source scan", async () => {
+    const { db, service } = createTestService();
+    const namespace = {
+      source: "codex",
+      profileId: "jiang",
+      userId: "user-targeted-import-worker"
+    };
+    const first = addAgentSourceImport(service, namespace, "first targeted import", "targeted-first");
+    const unrelated = addAgentSourceImport(service, namespace, "unrelated import", "targeted-unrelated");
+
+    const summaryRun = await service.runWorkerOnce(10, { targetMemoryIds: [first.id] });
+    const embeddingRun = await service.runWorkerOnce(10, { targetMemoryIds: [first.id] });
+
+    expect(summaryRun.jobs).toEqual([
+      expect.objectContaining({ jobType: "import_summary", targetMemoryId: first.id })
+    ]);
+    expect(embeddingRun.jobs).toEqual([
+      expect.objectContaining({ jobType: "embedding", targetMemoryId: first.id })
+    ]);
+    expect(service.enqueuePendingImportSummaries().memoryIds).toEqual([unrelated.id]);
 
     db.close();
   });

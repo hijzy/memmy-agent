@@ -1,6 +1,9 @@
 /** Agent source service module. */
 import { randomUUID } from "node:crypto";
-import { setImmediate as yieldToEventLoop } from "node:timers/promises";
+import {
+  setImmediate as yieldToEventLoop,
+  setTimeout as waitForWorkerProgress
+} from "node:timers/promises";
 import type {
   AddManualInput,
   AgentSourceMemoryPluginConflict,
@@ -27,6 +30,7 @@ const IMPORT_SUMMARY_PRIORITY_LIMIT = 100;
 const IMPORT_SUMMARY_PRIORITY_BATCH_SIZE = 20;
 const IMPORT_SUMMARY_STANDARD_BATCH_SIZE = 100;
 const IMPORT_WORKER_TIMEOUT_MS = 600_000;
+const IMPORT_PROGRESS_POLL_INTERVAL_MS = 250;
 const INITIAL_GLOBAL_MEMORY_LIMIT = 1_000;
 const INITIAL_ABSENT_SOURCE_MEMORY_LIMIT = 200;
 const INITIAL_SOURCE_MEMORY_LIMIT = 1_000;
@@ -566,6 +570,7 @@ async function processPendingImportSummaries(
   const progressSourceId = scanOptions.progressSourceId ?? "all";
   let indexed = 0;
   let prioritySummaries = 0;
+  let lastProgressAt = Date.now();
   emitProgress(scanOptions, {
     sourceId: progressSourceId,
     phase: "summarize",
@@ -581,15 +586,27 @@ async function processPendingImportSummaries(
       : IMPORT_SUMMARY_STANDARD_BATCH_SIZE;
     const result = await options.memoryClient.runWorker({
       limit,
+      targetMemoryIds: [...pendingMemoryIds],
       signal: scanOptions.signal,
       timeoutMs: IMPORT_WORKER_TIMEOUT_MS
     });
 
     prioritySummaries += result.jobs.filter((job) =>
       job.jobType === "import_summary" &&
-      Boolean(job.targetMemoryId && queued.memoryIds.includes(job.targetMemoryId))
+      Boolean(job.targetMemoryId && pendingMemoryIds.has(job.targetMemoryId))
     ).length;
-    indexed += consumeIndexedMemoryIds(pendingMemoryIds, result);
+    const refreshed = await options.memoryClient.enqueueImportSummaries();
+    const unprocessedMemoryIds = new Set(refreshed.memoryIds);
+    const previousPending = pendingMemoryIds.size;
+    for (const memoryId of pendingMemoryIds) {
+      if (!unprocessedMemoryIds.has(memoryId)) {
+        pendingMemoryIds.delete(memoryId);
+      }
+    }
+    indexed = queued.memoryIds.length - pendingMemoryIds.size;
+    if (pendingMemoryIds.size < previousPending) {
+      lastProgressAt = Date.now();
+    }
     emitProgress(scanOptions, {
       sourceId: progressSourceId,
       phase: "summarize",
@@ -598,35 +615,17 @@ async function processPendingImportSummaries(
       message: "Summarizing and indexing latest memories"
     });
 
-    if (result.leased === 0 && result.embeddingRetries.leased === 0) {
+    if (pendingMemoryIds.size === 0) {
       break;
+    }
+    if (Date.now() - lastProgressAt >= IMPORT_WORKER_TIMEOUT_MS) {
+      throw new Error(`Timed out waiting for ${pendingMemoryIds.size} imported memories to finish indexing`);
+    }
+    if (result.leased === 0 && result.embeddingRetries.leased === 0) {
+      await waitForWorkerProgress(IMPORT_PROGRESS_POLL_INTERVAL_MS, undefined, { signal: scanOptions.signal });
     }
     await yieldToEventLoop();
   }
-}
-
-function consumeIndexedMemoryIds(
-  pendingMemoryIds: Set<string>,
-  result: Awaited<ReturnType<Pick<MemoryClient, "runWorker">["runWorker"]>>
-): number {
-  let indexed = 0;
-  for (const job of result.jobs) {
-    if (job.jobType !== "embedding" || job.status !== "succeeded" || !job.targetMemoryId) {
-      continue;
-    }
-    if (pendingMemoryIds.delete(job.targetMemoryId)) {
-      indexed += 1;
-    }
-  }
-  for (const retry of result.embeddingRetries.items) {
-    if (retry.status !== "succeeded") {
-      continue;
-    }
-    if (pendingMemoryIds.delete(retry.targetMemoryId)) {
-      indexed += 1;
-    }
-  }
-  return indexed;
 }
 
 async function* toAsyncIterable(messages: readonly ConversationMessage[]): AsyncIterable<ConversationMessage> {

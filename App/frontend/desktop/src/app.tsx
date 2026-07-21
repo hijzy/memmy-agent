@@ -32,7 +32,12 @@ import {
   formatScanCompletedError
 } from "./pages/agent-source-scan-error.js";
 import { useTranslation } from "./i18n/use-translation.js";
-import { agentActions, appActions, type AppAction } from "./state/app-actions.js";
+import {
+  AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS,
+  agentActions,
+  appActions,
+  type AppAction
+} from "./state/app-actions.js";
 import { useAppState } from "./state/app-state.js";
 
 /** Handles app. */
@@ -68,6 +73,7 @@ function RuntimeApp() {
   useEffect(() => {
     let events: EventSource | undefined;
     let isActive = true;
+    const scanCompletionTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
     /** Handles boot. */
     async function boot() {
@@ -162,9 +168,23 @@ function RuntimeApp() {
         });
         events.addEventListener("agent_source.scan_completed", (event) => {
           const parsed = parseSseEvent(event);
-          const scanResults = parsed?.type === "agent_source.scan_completed" ? parsed.payload.results : null;
+          if (parsed?.type !== "agent_source.scan_completed") {
+            return;
+          }
+          const { jobId, sourceId, results: scanResults } = parsed.payload;
+          const scanSucceeded = scanResults.every((result) => result.errors.length === 0);
           clearMemoryPanelCache();
-          dispatch(appActions.agentSourceScanCompleted());
+          dispatch(appActions.agentSourceScanCompleted({ jobId, sourceId, succeeded: scanSucceeded }));
+          if (scanSucceeded) {
+            const existingTimeout = scanCompletionTimeouts.get(jobId);
+            if (existingTimeout) {
+              clearTimeout(existingTimeout);
+            }
+            scanCompletionTimeouts.set(jobId, setTimeout(() => {
+              scanCompletionTimeouts.delete(jobId);
+              dispatch(appActions.agentSourceScanCompletionExpired(jobId));
+            }, AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS));
+          }
           void clients.agentSources
             .listSources()
             .then((nextSources) => {
@@ -197,6 +217,9 @@ function RuntimeApp() {
     return () => {
       isActive = false;
       events?.close();
+      for (const timeout of scanCompletionTimeouts.values()) {
+        clearTimeout(timeout);
+      }
     };
   }, [bootKey, dispatch, setClients]);
 

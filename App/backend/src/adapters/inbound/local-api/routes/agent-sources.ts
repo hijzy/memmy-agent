@@ -315,6 +315,7 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
         }
         options.progressBus.emit("agent_source.scan_completed", {
           jobId: scanJob.jobId,
+          sourceId: scanJob.sourceId,
           results
         });
       }
@@ -389,6 +390,7 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     if (message.type === "completed") {
       options.progressBus.emit("agent_source.scan_completed", {
         jobId,
+        sourceId: activeScanJob.sourceId,
         results: message.results
       });
       finishActiveScanJob(jobId);
@@ -405,6 +407,7 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
 
     options.progressBus.emit("agent_source.scan_completed", {
       jobId,
+      sourceId: activeScanJob.sourceId,
       results: [
         {
           sourceId: activeScanJob.sourceId,

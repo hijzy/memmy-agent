@@ -2,7 +2,7 @@
 import { ASR_DEFAULT_BASE_URL, QWEN_ASR_MODEL_ID, type AgentSourceView, type AppBootstrapResponse, type ScanPreferences } from "@memmy/local-api-contracts";
 import type { AppRoutePath, PreferredMode } from "../app/routes.js";
 import type { ModelProviderConfig } from "../api/config-client.js";
-import type { AgentSourceScanProgress, AppAction, EventConnectionStatus } from "./app-actions.js";
+import type { AgentSourceScanCompletion, AgentSourceScanProgress, AppAction, EventConnectionStatus } from "./app-actions.js";
 import { agentReducer, initialAgentState, type AgentAction, type AgentState } from "./agent-chat-slice.js";
 import { initialToolsState, toolsReducer, type ToolsAction, type ToolsState } from "./tools-slice.js";
 
@@ -25,8 +25,11 @@ export interface AgentSourcesState {
   items: AgentSourceView[];
   isLoading: boolean;
   isScanning: boolean;
+  activeScanSourceId: string | null;
   error: string | null;
   scanProgress: AgentSourceScanProgress | null;
+  lastFinishedScanJobId: string | null;
+  recentScanCompletions: AgentSourceScanCompletion[];
   scanPreferences: ScanPreferences;
 }
 
@@ -109,8 +112,11 @@ export function createInitialAppState(): AppState {
       items: [],
       isLoading: false,
       isScanning: false,
+      activeScanSourceId: null,
       error: null,
       scanProgress: null,
+      lastFinishedScanJobId: null,
+      recentScanCompletions: [],
       scanPreferences: defaultScanPreferences
     },
     account: {
@@ -224,7 +230,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "agentSources/loaded":
       return {
         ...state,
-        agentSources: { ...state.agentSources, items: action.sources, isLoading: false, isScanning: false, error: null, scanProgress: null }
+        agentSources: { ...state.agentSources, items: action.sources, isLoading: false, isScanning: false, activeScanSourceId: null, error: null, scanProgress: null }
       };
     case "agentSources/refreshed":
       return {
@@ -234,14 +240,17 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "agentSources/error":
       return {
         ...state,
-        agentSources: { ...state.agentSources, isLoading: false, isScanning: false, error: action.message, scanProgress: null }
+        agentSources: { ...state.agentSources, isLoading: false, isScanning: false, activeScanSourceId: null, error: action.message, scanProgress: null }
       };
     case "agentSources/scanStarted":
       return {
         ...state,
-        agentSources: { ...state.agentSources, isScanning: true, error: null, scanProgress: null }
+        agentSources: { ...state.agentSources, isScanning: true, activeScanSourceId: action.sourceId, error: null, scanProgress: null }
       };
     case "agentSources/scanProgress":
+      if (state.agentSources.lastFinishedScanJobId === action.progress.jobId) {
+        return state;
+      }
       if (
         state.agentSources.scanProgress?.phase === "stopped" &&
         state.agentSources.scanProgress.jobId === action.progress.jobId &&
@@ -252,12 +261,39 @@ export function appReducer(state: AppState, action: AppAction): AppState {
 
       return {
         ...state,
-        agentSources: { ...state.agentSources, isScanning: action.progress.phase !== "stopped", error: null, scanProgress: action.progress }
+        agentSources: {
+          ...state.agentSources,
+          isScanning: action.progress.phase !== "stopped",
+          activeScanSourceId: action.progress.sourceId,
+          error: null,
+          scanProgress: action.progress
+        }
       };
     case "agentSources/scanCompleted":
       return {
         ...state,
-        agentSources: { ...state.agentSources, isScanning: false, error: null, scanProgress: null }
+        agentSources: {
+          ...state.agentSources,
+          isScanning: false,
+          activeScanSourceId: null,
+          error: null,
+          scanProgress: null,
+          lastFinishedScanJobId: action.scan?.jobId ?? state.agentSources.lastFinishedScanJobId,
+          recentScanCompletions: action.scan?.succeeded
+            ? [
+                ...state.agentSources.recentScanCompletions.filter((item) => item.sourceId !== action.scan?.sourceId),
+                { jobId: action.scan.jobId, sourceId: action.scan.sourceId }
+              ]
+            : state.agentSources.recentScanCompletions
+        }
+      };
+    case "agentSources/scanCompletionExpired":
+      return {
+        ...state,
+        agentSources: {
+          ...state.agentSources,
+          recentScanCompletions: state.agentSources.recentScanCompletions.filter((item) => item.jobId !== action.jobId)
+        }
       };
     case "scanPreferences/updated":
       return {

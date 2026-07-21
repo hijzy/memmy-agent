@@ -48,7 +48,12 @@ export interface MemoryClient {
   deleteMemory(input: DeleteMemoryInput & { memoryId: string }): Promise<DeleteMemoryOutput>;
 
   enqueueImportSummaries(): Promise<EnqueueImportSummariesOutput>;
-  runWorker(input: { limit: number; signal?: AbortSignal; timeoutMs?: number }): Promise<WorkerRunOutput>;
+  runWorker(input: {
+    limit: number;
+    targetMemoryIds?: string[];
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  }): Promise<WorkerRunOutput>;
 
   panelOverview(): Promise<PanelOverviewOutput>;
   panelAnalysis(): Promise<PanelAnalysisOutput>;

@@ -566,6 +566,22 @@ export class MemoryRepository {
     return this.hydrateMany(rows.map(memoryFromSql));
   }
 
+  listUnprocessedAgentSourceImports(limit = 10000): MemoryRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM memories
+         WHERE deleted_at IS NULL
+           AND status != 'deleted'
+           AND memory_layer = 'L1'
+           AND json_extract(properties_json, '$.internal_info.import_pipeline.status') IN ('summary_queued', 'indexing')
+         ORDER BY created_at DESC, updated_at DESC, id DESC
+         LIMIT ?`
+      )
+      .all(limit) as MemorySqlRow[];
+    return this.hydrateMany(rows.map(memoryFromSql));
+  }
+
   listUnindexedL1Imports(limit = 10000): MemoryRow[] {
     const rows = this.db
       .prepare(
@@ -2000,9 +2016,19 @@ export class RuntimeRepository {
     return Boolean(row);
   }
 
-  leaseQueuedJobs(limit = 10, leaseSeconds = 60): EvolutionJobRecord[] {
+  leaseQueuedJobs(
+    limit = 10,
+    leaseSeconds = 60,
+    targetMemoryIds?: readonly string[]
+  ): EvolutionJobRecord[] {
+    if (targetMemoryIds?.length === 0) {
+      return [];
+    }
     const at = nowIso();
     const leaseUntil = new Date(Date.now() + leaseSeconds * 1000).toISOString();
+    const targetFilter = targetMemoryIds
+      ? `AND target_memory_id IN (${targetMemoryIds.map(() => "?").join(", ")})`
+      : "";
     const transaction = this.db.transaction(() => {
       const rows = this.db
         .prepare(
@@ -2015,10 +2041,11 @@ export class RuntimeRepository {
                json_extract(payload_json, '$.runAfter') IS NULL
                OR CAST(json_extract(payload_json, '$.runAfter') AS TEXT) <= ?
              )
+             ${targetFilter}
            ORDER BY ${evolutionJobOrderSql()}
            LIMIT ?`
         )
-        .all(at, at, limit) as SqlJobRow[];
+        .all(at, at, ...(targetMemoryIds ?? []), limit) as SqlJobRow[];
 
       for (const row of rows) {
         this.db
@@ -2058,7 +2085,17 @@ export class RuntimeRepository {
     return this.getJob(id);
   }
 
-  requeueFailedJobs(limit = 100, at = nowIso()): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+  requeueFailedJobs(
+    limit = 100,
+    at = nowIso(),
+    targetMemoryIds?: readonly string[]
+  ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    if (targetMemoryIds?.length === 0) {
+      return [];
+    }
+    const targetFilter = targetMemoryIds
+      ? `AND target_memory_id IN (${targetMemoryIds.map(() => "?").join(", ")})`
+      : "";
     const transaction = this.db.transaction(() => {
       const rows = this.db
         .prepare(
@@ -2066,10 +2103,11 @@ export class RuntimeRepository {
            FROM evolution_jobs
            WHERE status = 'failed'
              AND attempts < max_attempts
+             ${targetFilter}
            ORDER BY ${evolutionJobOrderSql()}
            LIMIT ?`
         )
-        .all(limit) as SqlJobRow[];
+        .all(...(targetMemoryIds ?? []), limit) as SqlJobRow[];
 
       for (const row of rows) {
         this.db
@@ -2325,8 +2363,15 @@ export class RuntimeRepository {
     workerId: string;
     leaseUntil: number;
     limit?: number;
+    targetMemoryIds?: readonly string[];
   }): EmbeddingRetryRecord[] {
+    if (input.targetMemoryIds?.length === 0) {
+      return [];
+    }
     const limit = Math.max(1, Math.min(200, Math.floor(input.limit ?? 25)));
+    const targetFilter = input.targetMemoryIds
+      ? `AND target_id IN (${input.targetMemoryIds.map(() => "?").join(", ")})`
+      : "";
     const transaction = this.db.transaction(() => {
       const rows = this.db
         .prepare(
@@ -2337,10 +2382,11 @@ export class RuntimeRepository {
              OR (status = 'in_progress' AND lease_until IS NOT NULL AND lease_until <= ?)
            )
              AND next_attempt_at <= ?
+             ${targetFilter}
            ORDER BY next_attempt_at ASC, created_at ASC
            LIMIT ?`
         )
-        .all(input.now, input.now, limit) as SqlEmbeddingRetryRow[];
+        .all(input.now, input.now, ...(input.targetMemoryIds ?? []), limit) as SqlEmbeddingRetryRow[];
       const claimed: EmbeddingRetryRecord[] = [];
       for (const row of rows) {
         const result = this.db

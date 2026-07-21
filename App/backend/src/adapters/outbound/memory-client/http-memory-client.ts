@@ -172,7 +172,10 @@ export function createHttpMemoryClient(
 
     async runWorker(input) {
       return request("POST", "runWorker", WorkerRunOutputSchema, {
-        body: { limit: input.limit },
+        body: {
+          limit: input.limit,
+          targetMemoryIds: input.targetMemoryIds
+        },
         signal: input.signal,
         timeoutMs: input.timeoutMs
       });

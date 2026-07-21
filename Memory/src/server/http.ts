@@ -414,10 +414,14 @@ async function routeRequest(
     requireMemoryWrite(principal);
     const request = envelopeWithPrincipal(asObject(body, "worker.run"), principal) as RequestEnvelope & {
       limit?: unknown;
+      targetMemoryIds?: unknown;
     };
     return service.runWorkerOnce(
       parseNumberValue(request.limit) ?? parseNumber(url.searchParams.get("limit")) ?? 20,
-      request
+      {
+        ...request,
+        targetMemoryIds: parseOptionalStringArray(request.targetMemoryIds, "worker.run.targetMemoryIds")
+      }
     );
   }
 
@@ -980,6 +984,16 @@ function parseNumberValue(value: unknown): number | undefined {
     return value;
   }
   return typeof value === "string" ? parseNumber(value) : undefined;
+}
+
+function parseOptionalStringArray(value: unknown, field: string): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.length === 0)) {
+    throw new MemoryServiceError("invalid_argument", `${field} must be an array of non-empty strings`);
+  }
+  return [...new Set(value)];
 }
 
 function parseApiLogTools(value: string | null): Array<"memory_add" | "memory_search" | "skill_generate" | "skill_evolve"> | undefined {
