@@ -3971,8 +3971,11 @@ describe("MemoryService", () => {
     expect(recall.hits.length).toBeGreaterThan(0);
     expect(recall.candidateMemoryIds).toEqual(expect.arrayContaining(recall.sourceMemoryIds));
     expect(recall.sourceMemoryIds).toEqual(recall.hits.map((hit) => hit.id));
-    expect(recall.injectedContext.markdown).toContain("# Memory context");
-    expect(recall.injectedContext.markdown).toContain("Summary:");
+    expect(recall.injectedContext.markdown).not.toContain("# Memory context");
+    expect(recall.injectedContext.markdown).not.toContain("Summary:");
+    expect(recall.injectedContext.markdown).toContain("User:\n   把记忆插件迁移为 SQLite 本地记忆底座服务");
+    expect(recall.injectedContext.markdown).toContain("Assistant:\n   已创建 REST 和 CLI 的服务框架。");
+    expect(recall.injectedContext.markdown).not.toContain("Reflection:");
     expect(recall.injectedContext.markdown).not.toContain("## Follow-up memory tools");
     expect(recall.injectedContext.markdown).not.toContain("memmy_memory_get");
     expect(recall.injectedContext.markdown).not.toContain("memmy_memory_search");
@@ -4271,7 +4274,7 @@ describe("MemoryService", () => {
     expect(recall.hits.some((hit) => hit.memoryLayer === "Skill")).toBe(true);
     expect(recall.hits.some((hit) => hit.memoryLayer === "L1")).toBe(true);
     expect(recall.hits.some((hit) => hit.memoryLayer === "L3")).toBe(true);
-    expect(recall.injectedContext.markdown).toContain("# Memory context");
+    expect(recall.injectedContext.markdown).not.toContain("# Memory context");
     expect(recall.injectedContext.markdown).toContain("## Skill Memories");
     expect(recall.injectedContext.markdown).toContain("id: skill_injected_packet");
     expect(recall.injectedContext.markdown).toContain("## L1 Trace Memories");
