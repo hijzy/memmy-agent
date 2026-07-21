@@ -69,7 +69,8 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   const [cliInstallError, setCliInstallError] = useState("");
   const scanProgress = state.agentSources.scanProgress;
   const isScanning = state.agentSources.isScanning;
-  const scanTargetSourceId = scanProgress?.sourceId ?? null;
+  const scanTargetSourceId = scanProgress?.sourceId ?? state.agentSources.activeScanSourceId;
+  const recentlyCompletedSourceIds = new Set(state.agentSources.recentScanCompletions.map((item) => item.sourceId));
   const scanStopped = scanProgress?.phase === "stopped";
   const showScanProgress = isScanning || scanStopped;
   const hasDeterminateScanProgress = Boolean(scanProgress && scanProgress.phase !== "scan" && scanProgress.phase !== "stopped" && scanProgress.total > 0);
@@ -209,7 +210,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
    * Triggers an automatic scan.
    */
   function scanSources(sourceId = "all", mode?: AgentSourceScanMode) {
-    if (!clients || isScanning) {
+    if (!clients || isScanning || recentlyCompletedSourceIds.has(sourceId)) {
       return;
     }
 
@@ -245,10 +246,6 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
         dispatch(appActions.scanPreferencesUpdated(previous));
         dispatch(appActions.agentSourcesFailed(error instanceof Error ? error.message : String(error)));
       });
-  }
-
-  function isSourceScanning(sourceId: string): boolean {
-    return isScanning && (scanTargetSourceId === "all" || scanTargetSourceId === sourceId);
   }
 
   function continueScan() {
@@ -628,21 +625,34 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
           <button
             type="button"
             onClick={scanStopped ? continueScan : () => scanSources()}
-            disabled={isScanning}
-            className="inline-flex h-8 items-center gap-2 rounded-btn bg-action-sky px-3.5 text-xs font-normal text-white shadow-sm transition-all hover:bg-action-sky-hover active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={isScanning || recentlyCompletedSourceIds.has("all")}
+            className={`inline-flex h-8 items-center gap-2 rounded-btn px-3.5 text-xs font-normal text-white shadow-sm transition-all active:scale-[0.98] disabled:cursor-not-allowed ${
+              recentlyCompletedSourceIds.has("all")
+                ? "bg-status-success"
+                : "bg-action-sky hover:bg-action-sky-hover disabled:opacity-50"
+            }`}
           >
-            {scanStopped ? <Play size={14} /> : <RefreshCw size={14} className={isScanning ? "animate-spin" : ""} />}
-            {t(scanStopped ? "memory.scanContinue" : "memory.syncNew")}
+            {recentlyCompletedSourceIds.has("all")
+              ? <CheckCircle2 size={14} />
+              : scanStopped
+                ? <Play size={14} />
+                : <RefreshCw size={14} className={isScanning ? "animate-spin" : ""} />}
+            {t(recentlyCompletedSourceIds.has("all") ? "memory.syncCompleted" : scanStopped ? "memory.scanContinue" : "memory.syncNew")}
           </button>
         </div>
       </div>
       <div className="space-y-2.5">
         {state.agentSources.items.map((source) => {
           const displayPath = formatSourceDataPath(source.dataPath);
-          const sourceScanning = isSourceScanning(source.sourceId);
+          const sourceScanButtonState = resolveAgentSourceScanButtonState(
+            source.sourceId,
+            isScanning,
+            scanTargetSourceId,
+            recentlyCompletedSourceIds
+          );
           const connectionAction = resolveAgentSourceConnectionAction(source);
           const connectionActionDisabled = isAgentSourceConnectionActionDisabled(source, connectionAction);
-          const sourceScanDisabled = isScanning || !source.available;
+          const sourceScanDisabled = isScanning || sourceScanButtonState === "completed" || !source.available;
 
           return (
             <article key={source.sourceId} className="flex items-center gap-4 p-4 bg-background-paper border-content-panel rounded-card transition-all">
@@ -666,10 +676,11 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
                 />
                 <ActionBtn
                   icon={<RefreshCw size={13} />}
-                  label={t(source.lastScannedAt ? "memory.syncNew" : "memory.firstScan")}
+                  label={t(sourceScanButtonState === "completed" ? "memory.syncCompleted" : source.lastScannedAt ? "memory.syncNew" : "memory.firstScan")}
                   onClick={() => scanSources(source.sourceId)}
                   disabled={sourceScanDisabled}
-                  busy={sourceScanning}
+                  busy={sourceScanButtonState === "running"}
+                  completed={sourceScanButtonState === "completed"}
                   title={!source.available ? t("memory.agentNotDetectedScanHint", { agent: source.displayName }) : undefined}
                 />
               </div>
@@ -1216,6 +1227,20 @@ export function formatSourceMemoryCount(count: number, t: (key: MessageKey, valu
   return t("memory.sourceMemoryCount", { count: count.toLocaleString("en-US") });
 }
 
+export type AgentSourceScanButtonState = "idle" | "running" | "completed";
+
+export function resolveAgentSourceScanButtonState(
+  sourceId: string,
+  isScanning: boolean,
+  scanTargetSourceId: string | null,
+  recentlyCompletedSourceIds: ReadonlySet<string>
+): AgentSourceScanButtonState {
+  if (isScanning && scanTargetSourceId === sourceId) {
+    return "running";
+  }
+  return recentlyCompletedSourceIds.has(sourceId) ? "completed" : "idle";
+}
+
 interface MemoryDatabaseExportSuccess {
   canceled: false;
   exportPath: string;
@@ -1466,19 +1491,25 @@ function ManualField(props: { label: string; value: string; onChange: (value: st
  * @param props.variant The visual tone.
  * @param props.onClick The click callback.
  * @param props.busy Whether to show the processing icon.
+ * @param props.completed Whether to show the short-lived completion acknowledgement.
  * @returns The action button node.
  */
-function ActionBtn(props: { icon: ReactNode; label: string; variant?: "default" | "primary" | "danger"; onClick?: () => void; disabled?: boolean; busy?: boolean; title?: string }) {
+function ActionBtn(props: { icon: ReactNode; label: string; variant?: "default" | "primary" | "danger"; onClick?: () => void; disabled?: boolean; busy?: boolean; completed?: boolean; title?: string }) {
   const variant = props.variant ?? "default";
-  const variantClass = {
-    default: "border-content-panel text-text-ink/70 hover:bg-canvas-oat/50",
-    primary: "border-action-sky/30 text-action-sky bg-action-sky/8 hover:bg-action-sky/15",
-    danger: "border-status-error/40 text-status-error hover:bg-status-error-soft"
-  }[variant];
+  const variantClass = props.completed
+    ? "border-status-success/35 text-status-success bg-status-success-soft"
+    : {
+        default: "border-content-panel text-text-ink/70 hover:bg-canvas-oat/50",
+        primary: "border-action-sky/30 text-action-sky bg-action-sky/8 hover:bg-action-sky/15",
+        danger: "border-status-error/40 text-status-error hover:bg-status-error-soft"
+      }[variant];
+  const disabledClass = props.disabled
+    ? props.completed ? "cursor-not-allowed" : "opacity-50 cursor-not-allowed"
+    : "cursor-pointer";
 
   return (
-    <button type="button" onClick={props.onClick} disabled={props.disabled} title={props.title} className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] rounded-btn border transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${variantClass}`}>
-      {props.busy ? <Loader2 size={13} className="animate-spin" /> : props.icon}
+    <button type="button" onClick={props.onClick} disabled={props.disabled} title={props.title} aria-live={props.completed ? "polite" : undefined} className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] rounded-btn border transition-all ${disabledClass} ${variantClass}`}>
+      {props.busy ? <Loader2 size={13} className="animate-spin" /> : props.completed ? <CheckCircle2 size={13} /> : props.icon}
       {props.label}
     </button>
   );
