@@ -1008,6 +1008,42 @@ describe("MemoryService", () => {
     db.close();
   });
 
+  it("classifies an HTML model response as a model endpoint configuration failure", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-memory-processing-html-response-"));
+    roots.push(root);
+    const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+    const baseLlm = createFailingLlm();
+    const llm: LlmClient = {
+      ...baseLlm,
+      async completeJson() {
+        throw new Error(
+          "openai_compatible HTTP 200: expected JSON but received HTML instead of a model API response; check the configured model endpoint"
+        );
+      }
+    };
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      llm,
+      embedder: createCapturingEmbedder([])
+    });
+    const namespace = { source: "codex", profileId: "default", userId: "html-response-user" };
+    const added = addAgentSourceImport(service, namespace, "bad model endpoint", "html-response");
+
+    await runWorkerRounds(service, 3, 1);
+
+    expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]).toMatchObject({
+      state: "failed",
+      stage: "summary",
+      attemptCount: 3,
+      retryAction: "open_settings",
+      errorCode: "model_configuration",
+      errorMessage: expect.stringContaining("HTTP 200")
+    });
+
+    db.close();
+  });
+
   it("marks corrupt trace payloads as non-retryable", async () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-memory-processing-corrupt-"));
     roots.push(root);
@@ -12232,6 +12268,55 @@ describe("MemoryService", () => {
       "panel.analysis",
       "panel.items"
     ]);
+
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    db.close();
+  });
+
+  it("serves the manual memory-processing retry endpoint", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-memory-http-processing-retry-"));
+    roots.push(root);
+    const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      llm: createFailingLlm(),
+      embedder: createCapturingEmbedder([])
+    });
+    const namespace = { source: "hermes", profileId: "default", userId: "http-retry-user" };
+    const added = addAgentSourceImport(service, namespace, "retry through HTTP", "http-retry");
+    await runWorkerRounds(service, 3, 1);
+    expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]?.state).toBe("failed");
+
+    const server = createMemoryHttpServer({ service });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("expected TCP address");
+    }
+
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/api/v1/memory/${encodeURIComponent(added.id)}/processing/retry`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ namespace })
+      }
+    );
+    const body = await response.json() as {
+      accepted: boolean;
+      processing: { state: string; stage: string | null; manualRetryCount: number };
+    };
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      accepted: true,
+      processing: {
+        state: "summary_pending",
+        stage: "summary",
+        manualRetryCount: 1
+      }
+    });
 
     await new Promise<void>((resolve) => server.close(() => resolve()));
     db.close();

@@ -11939,7 +11939,7 @@ function classifyProcessingError(message: string): {
   retryAction: "retry" | "open_settings" | "none";
 } {
   const normalized = message.toLowerCase();
-  if (/api.?key|unauthorized|forbidden|\b401\b|\b403\b|model.+not configured|missing.+model/.test(normalized)) {
+  if (/api.?key|unauthorized|forbidden|\b401\b|\b403\b|\b404\b|model.+not configured|missing.+model|expected json|html instead of json|configured model endpoint/.test(normalized)) {
     return { code: "model_configuration", retryAction: "open_settings" };
   }
   if (/trace payload is missing|memory content is missing|corrupt|malformed memory/.test(normalized)) {
