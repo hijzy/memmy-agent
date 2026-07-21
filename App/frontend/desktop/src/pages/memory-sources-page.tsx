@@ -78,6 +78,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   const connectedNames = new Set(state.agentSources.items.map((source) => source.displayName));
   const scanPercent = scanProgress && hasDeterminateScanProgress ? formatActiveScanPercent(scanProgress.current, scanProgress.total) : 0;
   const scannableSources = state.agentSources.items.filter((source) => source.available);
+  const memoryServiceAddress = formatMemoryServiceAddress(clients?.runtimeConfig.memory?.baseUrl);
 
   useEffect(() => {
     setMemoryServiceStatus((current) => current === "checking" ? memoryServiceStatusFromBootstrap(state.bootstrap?.health.memory) : current);
@@ -125,8 +126,15 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
     }
   }
 
-  function reloadMemoryServiceConfig() {
+  function restartMemoryService() {
     if (!clients || memoryServiceBusy) {
+      return;
+    }
+
+    const restart = typeof window === "undefined" ? undefined : window.memmy?.restartMemoryService;
+    if (typeof restart !== "function") {
+      setMemoryServiceMessage("");
+      setMemoryServiceError(t("memory.restartServiceUnavailable"));
       return;
     }
 
@@ -136,26 +144,26 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
     setMemoryServiceError("");
     void (async () => {
       try {
-        await clients.memoryRuntime.reloadConfig({ reason: "manual_reload" });
+        await restart();
         clearMemoryPanelCache();
 
         try {
           const health = await clients.memoryRuntime.health();
           if (health.ok && health.storage.ready) {
             setMemoryServiceStatus("ok");
-            setMemoryServiceMessage(t("memory.reloadConfigDone"));
+            setMemoryServiceMessage(t("memory.restartServiceDone"));
             return;
           }
 
           setMemoryServiceStatus("unavailable");
-          setMemoryServiceError(t("memory.reloadConfigStillUnavailable"));
+          setMemoryServiceError(t("memory.restartServiceStillUnavailable"));
         } catch (error) {
           setMemoryServiceStatus("unavailable");
-          setMemoryServiceError(t("memory.reloadConfigStillUnavailableWithReason", { reason: formatErrorMessage(error) }));
+          setMemoryServiceError(t("memory.restartServiceStillUnavailableWithReason", { reason: formatErrorMessage(error) }));
         }
       } catch (error) {
         setMemoryServiceStatus("unavailable");
-        setMemoryServiceError(t("memory.reloadConfigFailed", { reason: formatErrorMessage(error) }));
+        setMemoryServiceError(t("memory.restartServiceFailed", { reason: formatErrorMessage(error) }));
       } finally {
         setMemoryServiceBusy(false);
       }
@@ -521,11 +529,11 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
             okLabel={t("memory.daemonRunning")}
             errLabel={t("memory.daemonStopped")}
             checkingLabel={t("common.loading")}
-            value={t("memory.daemonAddress")}
+            value={memoryServiceAddress ?? t("memory.daemonAddressUnavailable")}
             description={t("memory.daemonDescription")}
-            actionLabel={t(memoryServiceBusy ? "memory.reloadConfigBusy" : "memory.reloadConfig")}
+            actionLabel={t(memoryServiceBusy ? "memory.restartServiceBusy" : "memory.restartService")}
             actionTone="success"
-            onAction={reloadMemoryServiceConfig}
+            onAction={restartMemoryService}
             actionDisabled={!clients || memoryServiceBusy}
             actionBusy={memoryServiceBusy}
             bordered
@@ -1206,6 +1214,15 @@ function renderConnectionActionIcon(action: AgentSourceConnectionAction): ReactN
  */
 export function formatSourceDataPath(dataPath: string): string {
   return dataPath.replace(/^\/Users\/[^/]+(?=\/|$)/, "~");
+}
+
+export function formatMemoryServiceAddress(baseUrl: string | undefined): string | undefined {
+  if (!baseUrl) return undefined;
+  try {
+    return new URL(baseUrl).host || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function formatCliProfilePaths(profilePaths: string[]): string {

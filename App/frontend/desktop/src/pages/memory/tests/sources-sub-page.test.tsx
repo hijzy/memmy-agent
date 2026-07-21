@@ -10,6 +10,7 @@ import { AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS } from "../../../state/app-act
 import { agentSourceLogoUrl } from "../../agent-source-logos.js";
 import {
   formatAgentSourceActionError,
+  formatMemoryServiceAddress,
   formatScanProgressTail,
   formatSourceDataPath,
   formatSourceMemoryCount,
@@ -114,6 +115,14 @@ describe("SourcesSubPage", () => {
     expect(formatSourceDataPath("/Users/zongy/.codex/sessions")).toBe("~/.codex/sessions");
     expect(formatSourceDataPath("~/.claude")).toBe("~/.claude");
     expect(formatSourceMemoryCount(1161, (key, values) => `${key}:${values?.count}`)).toBe("memory.sourceMemoryCount:1,161");
+  });
+
+  it("从运行时 Memory URL 展示真实端口，不再写死旧地址", () => {
+    expect(formatMemoryServiceAddress("http://127.0.0.1:18960")).toBe("127.0.0.1:18960");
+    expect(formatMemoryServiceAddress("http://localhost:18888/")).toBe("localhost:18888");
+    expect(formatMemoryServiceAddress(undefined)).toBeUndefined();
+    expect(zhCNMessages["memory.restartService"]).toBe("重启服务");
+    expect(zhCNMessages).not.toHaveProperty("memory.daemonAddress");
   });
 
   it("接入源不可用时展示用户文案而不是 HTTP 调试信息", () => {
