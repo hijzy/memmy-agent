@@ -4,7 +4,9 @@ import stringWidth from "string-width";
 import { AgentLoop } from "../../core/agent-runtime/loop.js";
 import { Config } from "../../config/schema.js";
 import { getConfigPath, getWorkspacePath } from "../../config/paths.js";
-import { withProgressCapabilities } from "../../utils/progress-events.js";
+import { withProgressCapabilities, type ProgressOptions } from "../../utils/progress-events.js";
+import { VERSION } from "../../version.js";
+import { resolveComposerCursorPosition, type ComposerLayout } from "./tui-cursor.js";
 
 type TuiMessageRole = "assistant" | "progress" | "system" | "user";
 
@@ -32,6 +34,16 @@ type ToolsetSummary = {
 type TerminalSize = {
   columns: number;
   rows: number;
+};
+
+type YogaLayoutNode = {
+  childNodes?: YogaLayoutNode[];
+  parentNode?: YogaLayoutNode | null;
+  yogaNode?: {
+    getComputedHeight: () => number;
+    getComputedLeft: () => number;
+    getComputedTop: () => number;
+  };
 };
 
 const PROMPT = "❯";
@@ -514,8 +526,8 @@ function isMacActionFallback(key: ModifierKey, input: string, target: "a" | "e" 
   return isMac && key.ctrl && !key.meta && key.super !== true && input.toLowerCase() === target;
 }
 
-function absolutePosition(node: any): { x: number; y: number } | null {
-  let current = node;
+function absolutePosition(node: unknown): { x: number; y: number } | null {
+  let current = node as YogaLayoutNode | null;
   let x = 0;
   let y = 0;
 
@@ -529,12 +541,18 @@ function absolutePosition(node: any): { x: number; y: number } | null {
   return { x, y };
 }
 
-function renderedTextPosition(node: any): { x: number; y: number } | null {
+function renderedTextLayout(node: unknown): ComposerLayout | null {
+  const layoutNode = node as YogaLayoutNode | null;
   const base = absolutePosition(node);
   if (!base) return null;
-  const firstTextNode = node?.childNodes?.find((child: any) => child?.yogaNode);
+  const firstTextNode = layoutNode?.childNodes?.find((child) => child.yogaNode);
+  let root = layoutNode;
+  while (root?.parentNode) root = root.parentNode;
+  const outputHeight = root?.yogaNode?.getComputedHeight?.();
+  if (typeof outputHeight !== "number" || !Number.isFinite(outputHeight)) return null;
 
   return {
+    outputHeight,
     x: base.x + (firstTextNode?.yogaNode?.getComputedLeft?.() ?? 0),
     y: base.y + (firstTextNode?.yogaNode?.getComputedTop?.() ?? 0),
   };
@@ -545,43 +563,45 @@ function ComposerInput({
   columns,
   cursor,
   placeholder,
+  rows,
   value,
 }: {
   active: boolean;
   columns: number;
   cursor: number;
   placeholder: string;
+  rows: number;
   value: string;
 }) {
-  const rowRef = useRef<any>(null);
+  const rowRef = useRef<unknown>(null);
   const { setCursorPosition } = useCursor();
   const prompt = ` ${PROMPT} `;
   const safeCursor = snapCursor(value, cursor);
   const beforeCursor = value.slice(0, safeCursor);
   const afterCursor = value.slice(safeCursor);
-  const [basePosition, setBasePosition] = useState<{ x: number; y: number } | undefined>(undefined);
-  const rowWidth = Math.max(1, columns - (basePosition?.x ?? 0));
+  const [layout, setLayout] = useState<ComposerLayout | undefined>(undefined);
+  const rowWidth = Math.max(1, columns - (layout?.x ?? 0));
   const cursorCells = stringWidth(prompt + beforeCursor);
-  const cursorPosition = basePosition
-    ? {
-        x: basePosition.x + (cursorCells % rowWidth),
-        y: basePosition.y + Math.floor(cursorCells / rowWidth),
-      }
+  const cursorPosition = layout
+    ? resolveComposerCursorPosition({ cursorCells, layout, rowWidth, terminalRows: rows })
     : undefined;
 
   setCursorPosition(active ? cursorPosition : undefined);
 
   useEffect(() => {
-    const base = renderedTextPosition(rowRef.current);
-    if (!base) return;
-    const nextBasePosition = { x: base.x, y: base.y };
-    setBasePosition((previous) =>
-      previous?.x === nextBasePosition.x && previous.y === nextBasePosition.y ? previous : nextBasePosition,
+    const nextLayout = renderedTextLayout(rowRef.current);
+    if (!nextLayout) return;
+    setLayout((previous) =>
+      previous?.x === nextLayout.x &&
+      previous.y === nextLayout.y &&
+      previous.outputHeight === nextLayout.outputHeight
+        ? previous
+        : nextLayout,
     );
   });
 
   return (
-    <Box ref={rowRef}>
+    <Box ref={(node) => { rowRef.current = node; }}>
       <Text color={active ? PALETTE.ink : PALETTE.muted} bold>
         {prompt}
       </Text>
@@ -851,7 +871,7 @@ function StatusRule({
 
 function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: TuiProps) {
   const { exit } = useApp();
-  const { columns } = useTerminalSize();
+  const { columns, rows } = useTerminalSize();
   const activeLoopRef = useRef<AgentLoop | null>(null);
   const activeAssistantIdRef = useRef<number | null>(null);
   const idRef = useRef(1);
@@ -924,8 +944,8 @@ function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: Tui
   }, [registerCleanup]);
 
   const handleProgress = useCallback(
-    async (content: string, opts: Record<string, any> = {}) => {
-      const metadata: Record<string, any> = { agentProgress: true, ...opts };
+    async (content: string, opts: ProgressOptions = {}) => {
+      const metadata: ProgressOptions & { agentProgress: boolean } = { agentProgress: true, ...opts };
       const text = content ?? "";
       if (metadata.reasoning || metadata.reasoningDelta) {
         if (text.trim()) setNotice(text.trim().slice(0, 80));
@@ -1124,6 +1144,7 @@ function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: Tui
           columns={columns}
           cursor={inputCursor}
           placeholder={inputPlaceholder}
+          rows={rows}
           value={input}
         />
         <Text color={PALETTE.line}>{repeated("─", ruleWidth)}</Text>
@@ -1132,7 +1153,7 @@ function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: Tui
   );
 }
 
-export async function runInkInteractiveAgent(config: Config, sessionId = "cli:direct", version = "0.0.0"): Promise<null> {
+export async function runInkInteractiveAgent(config: Config, sessionId = "cli:direct"): Promise<null> {
   if (!process.stdin.isTTY) return null;
   const toolsets = readToolsets(config);
   let cleanup: TuiCleanup = async () => undefined;
@@ -1142,7 +1163,7 @@ export async function runInkInteractiveAgent(config: Config, sessionId = "cli:di
 
   process.stdout.write("\x1b[2J\x1b[H\x1b[3J");
   const instance = render(
-    <MemmyTui config={config} registerCleanup={registerCleanup} sessionId={sessionId} toolsets={toolsets} version={version} />,
+    <MemmyTui config={config} registerCleanup={registerCleanup} sessionId={sessionId} toolsets={toolsets} version={VERSION} />,
     { exitOnCtrlC: false, maxFps: 60 },
   );
 
