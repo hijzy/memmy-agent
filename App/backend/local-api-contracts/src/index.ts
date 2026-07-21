@@ -319,7 +319,13 @@ export type AgentSourceScanProgressPayload = z.infer<typeof AgentSourceScanProgr
 
 export const AgentSourceScanStatusResponseSchema = z.object({
     active: z.boolean(),
-    progress: AgentSourceScanProgressPayloadSchema.nullable()
+    progress: AgentSourceScanProgressPayloadSchema.nullable(),
+    completion: z.object({
+        jobId: z.string().min(1),
+        sourceId: z.string().min(1),
+        succeeded: z.boolean(),
+        completedAt: z.string().datetime()
+    }).nullable().optional()
 });
 export type AgentSourceScanStatusResponse = z.infer<typeof AgentSourceScanStatusResponseSchema>;
 
@@ -360,6 +366,7 @@ export const ScanResultSchema = z.object({
     discoveredConversations: z.number().int().nonnegative(),
     emittedMessages: z.number().int().nonnegative(),
     skipped: z.number().int().nonnegative(),
+    memoryIds: z.array(z.string().min(1)).optional(),
     errors: z.array(
         z.object({
             conversationId: z.string().min(1),
@@ -1046,6 +1053,7 @@ export const ScanCompletedSseEventSchema = z.object({
     timestamp: z.string().datetime(),
     payload: z.object({
         jobId: z.string().min(1),
+        sourceId: z.string().min(1),
         results: z.array(ScanResultSchema)
     })
 });
