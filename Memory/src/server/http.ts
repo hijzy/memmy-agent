@@ -269,6 +269,7 @@ function createAutoWorkerDrain(
       if (disposed || startupReleased) {
         return;
       }
+      startupReleased = true;
       if (startupTimer) {
         clearTimeout(startupTimer);
       }
