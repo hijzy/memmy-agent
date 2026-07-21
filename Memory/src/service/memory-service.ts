@@ -93,7 +93,7 @@ import {
   buildWorldModelDraft,
   classifyFeedbackText,
   classifyTurnFeedback,
-  classifyIntentWithLlm,
+  classifyIntent,
   classifyTurnRelation,
   classifyTurnRelationWithLlm,
   compileRetrievalQuery,
@@ -1135,11 +1135,7 @@ export class MemoryService {
       latestEpisodeBefore ? this.repos.runtime.getEpisode(latestEpisodeBefore.id) : undefined
     );
     const intentDecision = episode.rawTurnIds.length === 0
-      ? await classifyIntentWithLlm(request.query, {
-          llm: this.llm,
-          timeoutMs: this.llm.config.timeoutMs,
-          disableLlm: !this.llm.isConfigured()
-        })
+      ? classifyIntent(request.query)
       : undefined;
     if (intentDecision) {
       this.repos.runtime.updateEpisodeMeta(episode.id, {
