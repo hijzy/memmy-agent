@@ -9,7 +9,6 @@ import {
   buildWorldModelDraft,
   classifyFeedbackText,
   classifyIntent,
-  classifyIntentWithLlm,
   classifyTurnFeedback,
   classifyTurnRelation,
   classifyTurnRelationWithLlm,
@@ -256,7 +255,7 @@ describe("plugin algorithm parity helpers", () => {
     expect(extractRetrievalTags("Docker container DOCKER")).toEqual(["docker"]);
   });
 
-  it("classifies plugin-style turn intents and retrieval tier plans", async () => {
+  it("classifies rule-matched intents and defaults unmatched input to full retrieval", () => {
     expect(classifyIntent("谢谢")).toMatchObject({
       kind: "chitchat",
       retrieval: { tier1: false, tier2: false, tier3: false }
@@ -269,32 +268,14 @@ describe("plugin algorithm parity helpers", () => {
       kind: "memory_probe",
       retrieval: { tier1: true, tier2: true, tier3: false }
     });
-
-    const calls: string[] = [];
-    const llmDecision = await classifyIntentWithLlm("Could be a task or a past-context question", {
-      llm: intentLlm(calls)
+    expect(classifyIntent("please help me refactor this config")).toMatchObject({
+      kind: "task",
+      retrieval: { tier1: true, tier2: true, tier3: true }
     });
-    expect(calls).toEqual(["session.intent.classify.v1"]);
-    expect(llmDecision).toMatchObject({
-      kind: "memory_probe",
-      retrieval: { tier1: true, tier2: true, tier3: false }
+    expect(classifyIntent("我喜欢吃什么")).toMatchObject({
+      kind: "unknown",
+      retrieval: { tier1: true, tier2: true, tier3: true }
     });
-  });
-
-  it("falls back to weak intent heuristics when the plugin-style LLM classifier is malformed", async () => {
-    const calls: string[] = [];
-    const decision = await classifyIntentWithLlm("please help me refactor this config", {
-      llm: intentLlm(calls, {
-        kind: "not_a_real_label",
-        confidence: 1,
-        reason: "bad label"
-      })
-    });
-
-    expect(calls).toEqual(["session.intent.classify.v1"]);
-    expect(decision.kind).toBe("task");
-    expect(decision.signals).toContain("task.imperative_verb");
-    expect(decision.signals).toContain("llm_skipped");
   });
 
   it("classifies feedback text with the plugin classifier rules", () => {
@@ -1890,50 +1871,6 @@ function worldModelMemory(
     createdAt: "2026-05-29T00:00:00.000Z",
     updatedAt: "2026-05-29T00:00:00.000Z"
   }, [{ vectorField: "vec", vector: vec }]);
-}
-
-function intentLlm(
-  calls: string[],
-  response: Record<string, unknown> = {
-    kind: "memory_probe",
-    confidence: 0.77,
-    reason: "asks about prior context"
-  }
-): LlmClient {
-  return {
-    config: {
-      provider: "host",
-      endpoint: "http://127.0.0.1/intent",
-      model: "intent-test",
-      enableThinking: false,
-      temperature: 0,
-      maxTokens: 300,
-      timeoutMs: 6000,
-      maxRetries: 0,
-      malformedRetries: 0
-    },
-    isConfigured() {
-      return true;
-    },
-    async complete() {
-      return "{}";
-    },
-    async completeJson<T extends Record<string, unknown>>(
-      _messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
-      options: { operation: string }
-    ): Promise<T> {
-      calls.push(options.operation);
-      return response as T;
-    },
-    status() {
-      return {
-        provider: "host",
-        model: "intent-test",
-        configured: true,
-        remote: true
-      };
-    }
-  };
 }
 
 function relationLlm(

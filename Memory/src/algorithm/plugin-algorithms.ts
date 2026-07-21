@@ -206,9 +206,6 @@ const RELATION_STRONG_HEURISTIC_THRESHOLD = 0.85;
 const RELATION_ARBITRATION_THRESHOLD = 0.8;
 const RELATION_ALLOWED: TurnRelation[] = ["revision", "follow_up", "new_task", "unknown"];
 const RELATION_GENERIC_TAGS = new Set(["trace", "turn", "memory", "openclaw", "codex", "hermes"]);
-const INTENT_ALLOWED: IntentKind[] = ["task", "memory_probe", "chitchat", "meta", "unknown"];
-const INTENT_STRONG_HEURISTIC_THRESHOLD = 0.85;
-
 export function classifyIntent(text: string): IntentDecision {
   const trimmed = text.trim();
   if (!trimmed) {
@@ -217,50 +214,6 @@ export function classifyIntent(text: string): IntentDecision {
   const heuristic = matchIntentHeuristic(trimmed);
   if (heuristic) {
     return intentDecision(heuristic.kind, heuristic.confidence, heuristic.reason, [heuristic.signal]);
-  }
-  return intentDecision("unknown", 0.4, "no classifier signal; defaulting to full retrieval", ["default_unknown"]);
-}
-
-export async function classifyIntentWithLlm(
-  text: string,
-  options: {
-    llm?: LlmClient;
-    timeoutMs?: number;
-    disableLlm?: boolean;
-  } = {}
-): Promise<IntentDecision> {
-  const trimmed = text.trim();
-  if (!trimmed) {
-    return intentDecision("chitchat", 0.9, "empty message", ["empty"]);
-  }
-  const heuristic = matchIntentHeuristic(trimmed);
-  if (heuristic && heuristic.confidence >= INTENT_STRONG_HEURISTIC_THRESHOLD) {
-    return intentDecision(heuristic.kind, heuristic.confidence, heuristic.reason, [heuristic.signal]);
-  }
-
-  const llm = options.llm;
-  if (!options.disableLlm && llm?.isConfigured()) {
-    try {
-      const result = await relationWithTimeout(
-        callIntentLlm(llm, trimmed),
-        options.timeoutMs ?? 6000
-      );
-      return {
-        ...result,
-        signals: ["llm", ...(heuristic ? [`heuristic:${heuristic.signal}(weak)`] : [])]
-      };
-    } catch {
-      // Fall through to plugin-style weak heuristic/default fallback.
-    }
-  }
-
-  if (heuristic) {
-    return intentDecision(
-      heuristic.kind,
-      heuristic.confidence,
-      `${heuristic.reason} (fallback)`,
-      [heuristic.signal, "llm_skipped"]
-    );
   }
   return intentDecision("unknown", 0.4, "no classifier signal; defaulting to full retrieval", ["default_unknown"]);
 }
@@ -668,57 +621,6 @@ function intentDecision(kind: IntentKind, confidence: number, reason: string, si
     reason: reason.slice(0, 120),
     retrieval: retrievalForIntent(kind),
     signals
-  };
-}
-
-const INTENT_SYSTEM_PROMPT = `You are a fast intent classifier for a memory/tool-using agent.
-
-Classify the user's message into ONE of:
-  - "task"         — user wants the agent to do work (build / fix / analyze / explain / run …).
-  - "memory_probe" — user is asking about past conversation context.
-  - "chitchat"     — small talk, thanks, greetings with no actionable content.
-  - "meta"         — command to the plugin itself (starts with "/memos" / "/memory").
-  - "unknown"      — truly ambiguous.
-
-Return JSON with exactly these keys:
-{
-  "kind": one of the five labels above,
-  "confidence": number in [0, 1],
-  "reason": short English justification (≤ 80 chars, no quotes)
-}
-
-Rules:
-- Never invent a new label.
-- If unsure, pick "unknown" with confidence ≤ 0.5.
-- "task" is the safe default for imperative requests in any language.`;
-
-async function callIntentLlm(llm: LlmClient, text: string): Promise<IntentDecision> {
-  const value = await llm.completeJson<Record<string, unknown>>(
-    [
-      { role: "system", content: INTENT_SYSTEM_PROMPT },
-      { role: "user", content: text.slice(0, 2000) }
-    ],
-    {
-      operation: "session.intent.classify.v1",
-      temperature: 0,
-      maxTokens: 260
-    }
-  );
-  if (typeof value.kind !== "string" || !INTENT_ALLOWED.includes(value.kind as IntentKind)) {
-    throw new Error(`intent.kind out of vocabulary: ${String(value.kind)}`);
-  }
-  if (typeof value.confidence !== "number") {
-    throw new Error("intent.confidence must be a number");
-  }
-  if (typeof value.reason !== "string") {
-    throw new Error("intent.reason must be a string");
-  }
-  const kind = value.kind as IntentKind;
-  const confidence = clamp01(value.confidence);
-  const reason = value.reason;
-  return {
-    ...intentDecision(kind, confidence, reason, ["llm"]),
-    llmModel: llm.config.model
   };
 }
 

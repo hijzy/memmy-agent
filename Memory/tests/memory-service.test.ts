@@ -5540,6 +5540,47 @@ describe("MemoryService", () => {
         }
       }
     });
+
+    service.closeSession(memoryProbeSession.sessionId);
+    const unknownSession = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-intent-gate",
+        sessionKey: "personal-memory-query"
+      }
+    });
+    const unknown = await service.startTurn({
+      turnId: "turn-intent-unknown",
+      sessionId: unknownSession.sessionId,
+      query: "我喜欢吃什么"
+    });
+
+    recallRow = db.db.prepare(
+      `SELECT layers_json, candidate_memory_ids_json
+       FROM recall_events
+       WHERE id = ?`
+    ).get(unknown.searchEventId) as {
+      layers_json: string;
+      candidate_memory_ids_json: string;
+    };
+    expect(JSON.parse(recallRow.layers_json)).toEqual(["Skill", "L2", "L1", "L3"]);
+
+    const unknownEpisode = db.db.prepare(
+      `SELECT meta_json
+       FROM episodes
+       WHERE id = ?`
+    ).get(unknown.episodeId) as { meta_json: string };
+    expect(JSON.parse(unknownEpisode.meta_json)).toMatchObject({
+      intentDecision: {
+        kind: "unknown",
+        retrieval: {
+          tier1: true,
+          tier2: true,
+          tier3: true
+        }
+      }
+    });
     db.close();
   });
 
@@ -14537,13 +14578,6 @@ function createRelationClassifierLlm(calls: string[]): LlmClient {
           reason: "database certificate rotation appears adjacent"
         } as unknown as T;
       }
-      if (options.operation === "session.intent.classify.v1") {
-        return {
-          kind: "task",
-          confidence: 0.72,
-          reason: "actionable follow-up"
-        } as unknown as T;
-      }
       return {
         relation: "follow_up",
         reason: "same certificate management task"
@@ -14587,13 +14621,6 @@ function createFollowUpRelationClassifierLlm(calls: string[]): LlmClient {
           relation: "follow_up",
           confidence: 0.8,
           reason: "same user preference and project fact"
-        } as unknown as T;
-      }
-      if (options.operation === "session.intent.classify.v1") {
-        return {
-          kind: "task",
-          confidence: 0.8,
-          reason: "question asks about stored project facts"
         } as unknown as T;
       }
       return {
