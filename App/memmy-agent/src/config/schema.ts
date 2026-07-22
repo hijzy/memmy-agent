@@ -1,5 +1,6 @@
 import { CronSchedule } from "../cron/types.js";
 import { PROVIDERS, findByName, normalizeProviderName } from "../providers/registry.js";
+import { DEFAULT_MAX_TOKENS } from "../token-budget.js";
 
 type Dict<T = any> = Record<string, T>;
 type MemoryProfileName = "account" | "byok";
@@ -264,7 +265,7 @@ export class ModelPresetConfig extends Base {
   label: string | null;
   model: string;
   provider = "auto";
-  maxTokens = 8192;
+  maxTokens = DEFAULT_MAX_TOKENS;
   contextWindowTokens = DEFAULT_CONTEXT_WINDOW_TOKENS;
   temperature = 0.7;
   reasoningEffort: string | null = null;
@@ -274,7 +275,7 @@ export class ModelPresetConfig extends Base {
     this.label = pick(init, ["label"], null);
     this.model = init.model;
     this.provider = pick(init, ["provider"], "auto");
-    this.maxTokens = pick(init, ["maxTokens"], 8192);
+    this.maxTokens = pick(init, ["maxTokens"], DEFAULT_MAX_TOKENS);
     this.contextWindowTokens = pick(init, ["contextWindowTokens"], DEFAULT_CONTEXT_WINDOW_TOKENS);
     this.temperature = pick(init, ["temperature"], 0.7);
     this.reasoningEffort = pick(init, ["reasoningEffort"], null);
@@ -295,7 +296,7 @@ export class AgentDefaults extends Base {
   modelPreset: string | null = null;
   model = "anthropic/claude-opus-4-5";
   provider = "auto";
-  maxTokens = 8192;
+  maxTokens = DEFAULT_MAX_TOKENS;
   contextWindowTokens = DEFAULT_CONTEXT_WINDOW_TOKENS;
   contextBlockLimit: number | null = null;
   temperature = 0.7;

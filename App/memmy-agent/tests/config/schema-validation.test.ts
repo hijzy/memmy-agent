@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { WebSocketConfig } from "../../src/integrations/channels/websocket.js";
+import { DEFAULT_MAX_TOKENS } from "../../src/token-budget.js";
 import {
   AgentDefaults,
   ApiConfig,
@@ -14,6 +15,8 @@ import {
 
 describe("config schema validation", () => {
   it("validates AgentDefaults numeric bounds and enums", () => {
+    expect(DEFAULT_MAX_TOKENS).toBe(65_536);
+    expect(new AgentDefaults().maxTokens).toBe(DEFAULT_MAX_TOKENS);
     expect(new AgentDefaults().temperature).toBe(0.7);
     expect(() => new AgentDefaults({ maxConcurrentSubagents: 0 })).toThrow(/maxConcurrentSubagents/);
     expect(() => new AgentDefaults({ providerRetryMode: "forever" })).toThrow(/providerRetryMode/);
@@ -50,6 +53,7 @@ describe("config schema validation", () => {
     expect(() => new InlineFallbackConfig({ provider: "", model: "gpt-4.1" })).toThrow(/fallback provider/);
 
     expect(new ModelPresetConfig({ model: "gpt-4.1" }).model).toBe("gpt-4.1");
+    expect(new ModelPresetConfig({ model: "gpt-4.1" }).maxTokens).toBe(DEFAULT_MAX_TOKENS);
     expect(new ModelPresetConfig({ model: "gpt-4.1" }).temperature).toBe(0.7);
     expect(new InlineFallbackConfig({ provider: "openai", model: "gpt-4.1" }).provider).toBe("openai");
   });
