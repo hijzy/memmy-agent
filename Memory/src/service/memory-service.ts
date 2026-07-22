@@ -38,6 +38,15 @@ import type {
 } from "../types.js";
 import { PROJECT_VERSION } from "../cli/project-version.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
+import {
+  namespaceForMemory,
+  namespaceForRawTurn,
+  namespaceForSession,
+  normalizeNamespace,
+  profileIdFromMemory,
+  projectIdFromMemory,
+  sessionScopeForOpenRequest
+} from "./namespace/namespace-scope.js";
 import { MemoryServiceError } from "../utils/error.js";
 import { newId, stableHash, stableStringify } from "../utils/id.js";
 import {
@@ -11319,87 +11328,6 @@ export class MemoryService {
       }
     };
   }
-}
-
-function normalizeNamespace(namespace?: RuntimeNamespace): RuntimeNamespace & {
-  userId: string;
-  source: string;
-  profileId: string;
-} {
-  return {
-    source: namespace?.source ?? DEFAULT_NAMESPACE_SOURCE,
-    profileId: namespace?.profileId ?? "default",
-    profileLabel: namespace?.profileLabel,
-    projectId: namespace?.projectId,
-    workspaceId: namespace?.workspaceId,
-    workspacePath: namespace?.workspacePath,
-    sessionKey: namespace?.sessionKey,
-    userId: namespace?.userId ?? "local-user",
-    tenantId: namespace?.tenantId
-  };
-}
-
-function sessionScopeForOpenRequest(
-  request: SessionOpenRequest,
-  namespace: RuntimeNamespace
-): Partial<Pick<SessionRecord, "source" | "profileId" | "projectId" | "workspaceId" | "workspacePath">> {
-  return {
-    source: request.source ?? request.namespace?.source,
-    profileId: request.profileId ?? request.namespace?.profileId,
-    projectId: request.projectId ?? request.namespace?.projectId ?? request.namespace?.workspaceId,
-    workspaceId: request.workspaceId ?? request.namespace?.workspaceId,
-    workspacePath: request.workspacePath ?? request.namespace?.workspacePath ?? namespace.workspacePath
-  };
-}
-
-function namespaceForSession(session: SessionRecord): RuntimeNamespace {
-  return {
-    source: session.source,
-    profileId: session.profileId,
-    profileLabel: session.profileLabel,
-    projectId: session.projectId,
-    workspaceId: session.workspaceId,
-    workspacePath: session.workspacePath,
-    sessionKey: session.hostSessionKey,
-    userId: session.userId
-  };
-}
-
-function namespaceForMemory(memory: MemoryRow): RuntimeNamespace {
-  return {
-    source: memory.agentId ?? DEFAULT_NAMESPACE_SOURCE,
-    profileId: profileIdFromMemory(memory) ?? "default",
-    projectId: projectIdFromMemory(memory),
-    workspaceId: memory.appId,
-    userId: memory.userId
-  };
-}
-
-function projectIdFromMemory(memory: MemoryRow): string | undefined {
-  const direct = memory.info.project_id;
-  if (typeof direct === "string" && direct.trim()) return direct.trim();
-  const camel = memory.info.projectId;
-  if (typeof camel === "string" && camel.trim()) return camel.trim();
-  const propertiesInfo = memory.properties.info?.project_id ?? memory.properties.info?.projectId;
-  if (typeof propertiesInfo === "string" && propertiesInfo.trim()) return propertiesInfo.trim();
-  return undefined;
-}
-
-function profileIdFromMemory(memory: MemoryRow): string | undefined {
-  const direct = memory.info.profile_id;
-  if (typeof direct === "string" && direct.trim()) return direct.trim();
-  const propertiesInfo = memory.properties.info?.profile_id;
-  if (typeof propertiesInfo === "string" && propertiesInfo.trim()) return propertiesInfo.trim();
-  return undefined;
-}
-
-function namespaceForRawTurn(rawTurn: RawTurnRecord): RuntimeNamespace {
-  return {
-    source: DEFAULT_NAMESPACE_SOURCE,
-    profileId: "default",
-    sessionKey: rawTurn.sessionId,
-    userId: rawTurn.userId
-  };
 }
 
 function withDuplicateFlag(value: unknown): unknown {
