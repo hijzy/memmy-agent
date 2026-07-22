@@ -62,6 +62,7 @@ import {
   sanitizeTurnStartRequest,
   turnStartContextHints
 } from "./turn/turn-normalization.js";
+import { isAgentSourceImportMemoryAdd, memoryAddKey, memoryAddTags } from "./import/memory-import-pipeline.js";
 import { MemoryServiceError } from "../utils/error.js";
 import { newId, stableHash, stableStringify } from "../utils/id.js";
 import {
@@ -11390,36 +11391,6 @@ function positiveInteger(value: number | undefined): number | undefined {
   if (value === undefined || !Number.isFinite(value)) return undefined;
   const normalized = Math.trunc(value);
   return normalized > 0 ? normalized : undefined;
-}
-
-function memoryAddKey(request: MemoryAddRequest, layer: MemoryLayer, title: string): string {
-  if (isAgentSourceImportMemoryAdd(request) && request.adapterId && request.turnId) {
-    return `memory.add:${request.adapterId}:turn:${request.turnId}`;
-  }
-  if (request.adapterId && request.requestId) {
-    return `memory.add:${request.adapterId}:${request.requestId}`;
-  }
-  return `manual:${stableHash(`${layer}:${title}:${request.content}`).slice(0, 20)}`;
-}
-
-function memoryAddTags(request: MemoryAddRequest, importTrace: boolean, traceTags: string[] = []): string[] {
-  if (importTrace) {
-    return uniq([
-      ...(request.tags ?? []),
-      ...(request.source ? [request.source] : []),
-      ...traceTags
-    ]);
-  }
-  return uniq([
-    "manual",
-    ...(request.source ? [request.source] : []),
-    ...(request.tags ?? [])
-  ]);
-}
-
-function isAgentSourceImportMemoryAdd(request: MemoryAddRequest): boolean {
-  return request.adapterId?.startsWith("agent-source:") === true ||
-    request.tags?.some((tag) => tag.trim().toLowerCase() === "agent-source") === true;
 }
 
 function normalizeMemoryAddCreatedAt(value: string | undefined): string | undefined {
