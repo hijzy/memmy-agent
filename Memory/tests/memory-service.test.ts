@@ -653,10 +653,7 @@ describe("MemoryService", () => {
   });
 
   it("does not plan query rewrite by default", async () => {
-    const calls: Array<{
-      messages: Array<{ role: string; content: string }>;
-      options: { operation: string; thinkingMode?: "inherit" | "enabled" | "disabled" };
-    }> = [];
+    const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
     const { db, service } = createTestService({
       skillLlm: createQueryRewriteLlm(calls, ["unused one", "unused two", "unused three"])
     });
@@ -1453,10 +1450,7 @@ describe("MemoryService", () => {
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
-    const calls: Array<{
-      messages: Array<{ role: string; content: string }>;
-      options: { operation: string; thinkingMode?: "inherit" | "enabled" | "disabled" };
-    }> = [];
+    const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
     const longSummary = "s".repeat(240);
     const service = createTestMemoryService({
       db,
@@ -3221,10 +3215,7 @@ describe("MemoryService", () => {
   });
 
   it("uses the plugin windowed batch reflection prompt contract in the worker", async () => {
-    const calls: Array<{
-      messages: Array<{ role: string; content: string }>;
-      options: { operation: string };
-    }> = [];
+    const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
     const root = mkdtempSync(join(tmpdir(), "mindock-memory-reflection-prompt-"));
     roots.push(root);
     const db = new MemoryDb({
@@ -8211,10 +8202,7 @@ describe("MemoryService", () => {
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
-    const calls: Array<{
-      messages: Array<{ role: string; content: string }>;
-      options: { operation: string; thinkingMode?: "inherit" | "enabled" | "disabled" };
-    }> = [];
+    const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
     const service = createTestMemoryService({
       db,
       mode: "dev",
@@ -8249,7 +8237,12 @@ describe("MemoryService", () => {
 
     const repairCall = calls.find((call) => call.options.operation === "decision.repair.v1");
     expect(repairCall).toBeTruthy();
-    expect(repairCall!.options.thinkingMode).toBe("enabled");
+    expect(repairCall!.options).toMatchObject({
+      operation: "decision.repair.v1",
+      thinkingMode: "enabled",
+      temperature: DEFAULT_MEMMY_CONFIG.evolution.temperature,
+      maxTokens: 800
+    });
     expect(repairCall!.messages[0]!.content).toContain("just-in-time guidance");
     expect(repairCall!.messages[0]!.content).toContain("retry loop");
     expect(repairCall!.messages[0]!.content).toContain("Never invent a tool name");
@@ -8285,10 +8278,7 @@ describe("MemoryService", () => {
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
-    const calls: Array<{
-      messages: Array<{ role: string; content: string }>;
-      options: { operation: string };
-    }> = [];
+    const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
     const service = createTestMemoryService({
       db,
       mode: "dev",
@@ -8332,7 +8322,11 @@ describe("MemoryService", () => {
   });
 
   it("creates feedback-derived experience policies with hydrated trace context and merge semantics", async () => {
-    const { db, service } = createTestService();
+    const embeddedTexts: string[] = [];
+    const embeddingRoles: Array<"query" | "document" | undefined> = [];
+    const { db, service } = createTestService({
+      embedder: createCapturingEmbedder(embeddedTexts, embeddingRoles)
+    });
     const session = service.openSession({
       namespace: {
         source: "codex",
@@ -8377,6 +8371,17 @@ describe("MemoryService", () => {
     expect(createdPolicy.evidence_polarity).toBe("positive");
     expect(createdPolicy.skill_eligible).toBe(true);
     expect(createdPolicy.source_feedback_ids).toEqual([ok.feedbackId]);
+    expect(embeddedTexts).toEqual([[
+      createdPolicy.title,
+      createdPolicy.trigger,
+      createdPolicy.procedure,
+      createdPolicy.verification,
+      createdPolicy.boundary
+    ].join("\n")]);
+    expect(embeddingRoles).toEqual(["query"]);
+    expect(ok.jobs).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobType: "embedding", targetMemoryId: created[0]!.id })
+    ]));
 
     const avoid = await service.feedback({
       sessionId: session.sessionId,
@@ -8466,7 +8471,7 @@ describe("MemoryService", () => {
       answer: "I parsed the filename as the issuer name."
     });
 
-    await service.feedback({
+    const feedbackResponse = await service.feedback({
       sessionId: session.sessionId,
       episodeId: complete.episodeId,
       l1MemoryId: complete.l1MemoryId,
@@ -8511,12 +8516,12 @@ describe("MemoryService", () => {
     expect(policy.policy_confidence).toBeGreaterThanOrEqual(0.91);
 
     const skillRow = db.db.prepare(
-      `SELECT properties_json
+      `SELECT id, properties_json
        FROM memories
        WHERE user_id = 'user-feedback-refiner'
          AND memory_layer = 'Skill'
        LIMIT 1`
-    ).get() as { properties_json: string } | undefined;
+    ).get() as { id: string; properties_json: string } | undefined;
     expect(skillRow).toBeTruthy();
     const skill = (JSON.parse(skillRow!.properties_json) as {
       internal_info: {
@@ -8532,6 +8537,9 @@ describe("MemoryService", () => {
     expect(skill.strict_trial).toBe(true);
     expect(skill.status).toBe("candidate");
     expect(skill.eta).toBe(0.1);
+    expect(feedbackResponse.jobs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobType: "embedding", targetMemoryId: skillRow!.id })
+    ]));
     db.close();
   });
 
@@ -8690,10 +8698,7 @@ describe("MemoryService", () => {
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
-    const calls: Array<{
-      messages: Array<{ role: string; content: string }>;
-      options: { operation: string };
-    }> = [];
+    const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
     const service = createTestMemoryService({
       db,
       mode: "dev",
@@ -8731,6 +8736,12 @@ describe("MemoryService", () => {
 
     const repairCall = calls.find((call) => call.options.operation === "decision.repair.v1");
     expect(repairCall).toBeTruthy();
+    expect(repairCall!.options).toMatchObject({
+      operation: "decision.repair.v1",
+      thinkingMode: "enabled",
+      temperature: DEFAULT_MEMMY_CONFIG.evolution.temperature,
+      maxTokens: 800
+    });
     expect(repairCall!.messages[1]!.content).toContain("failure-burst");
     expect(repairCall!.messages[1]!.content).toContain("missing sqlite migration");
 
@@ -8758,7 +8769,10 @@ describe("MemoryService", () => {
   });
 
   it("creates decision repairs when same-context reward values diverge", async () => {
-    const { db, service } = createTestService();
+    const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
+    const { db, service } = createTestService({
+      skillLlm: createDecisionRepairLlm(calls)
+    });
     const session = service.openSession({
       namespace: {
         source: "codex",
@@ -8816,8 +8830,21 @@ describe("MemoryService", () => {
     expect(JSON.parse(repair!.high_value_memory_ids_json)).toContain(positive.l1MemoryId);
     expect(JSON.parse(repair!.low_value_memory_ids_json)).toContain(negative.l1MemoryId);
     expect(JSON.parse(repair!.source_json)).toMatchObject({
-      trigger: "value-distribution"
+      trigger: "value-distribution",
+      synthesis: "llm"
     });
+    const repairCall = calls.find((call) =>
+      call.options.operation === "decision.repair.v1"
+      && call.messages[1]?.content.includes("TRIGGER: value-distribution")
+    );
+    expect(repairCall).toBeTruthy();
+    expect(repairCall!.options).toMatchObject({
+      operation: "decision.repair.v1",
+      thinkingMode: "enabled",
+      temperature: DEFAULT_MEMMY_CONFIG.evolution.temperature,
+      maxTokens: 800
+    });
+    expect(repairCall!.messages[1]!.content).toContain("TRIGGER: value-distribution");
 
     const episode = db.db.prepare(
       `SELECT decision_repair_ids_json
@@ -14519,7 +14546,10 @@ function createFlakyEmbedder(): Embedder {
   };
 }
 
-function createCapturingEmbedder(seenTexts: string[]): Embedder {
+function createCapturingEmbedder(
+  seenTexts: string[],
+  seenRoles?: Array<"query" | "document" | undefined>
+): Embedder {
   return {
     config: {
       ...DEFAULT_MEMMY_CONFIG.embedding,
@@ -14529,12 +14559,14 @@ function createCapturingEmbedder(seenTexts: string[]): Embedder {
     isRemote() {
       return false;
     },
-    async embed(texts: string[]) {
+    async embed(texts: string[], role?: "query" | "document") {
       seenTexts.push(...texts);
+      seenRoles?.push(...texts.map(() => role));
       return texts.map((_, index) => index === 0 ? [1, 0, 0] : [0, 1, 0]);
     },
-    async embedOne(text: string) {
+    async embedOne(text: string, role?: "query" | "document") {
       seenTexts.push(text);
+      seenRoles?.push(role);
       return [1, 0, 0];
     },
     status() {
@@ -14897,10 +14929,9 @@ function createFeedbackRefinerLlm(calls: Array<{
   };
 }
 
-function createDecisionRepairLlm(calls: Array<{
-  messages: Array<{ role: string; content: string }>;
-  options: { operation: string };
-}>): LlmClient {
+function createDecisionRepairLlm(
+  calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }>
+): LlmClient {
   return {
     config: {
       ...DEFAULT_MEMMY_CONFIG.evolution,
@@ -14915,8 +14946,8 @@ function createDecisionRepairLlm(calls: Array<{
       return "{}";
     },
     async completeJson<T extends Record<string, unknown>>(
-      messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
-      options: { operation: string }
+      messages: LlmMessage[],
+      options: LlmCompletionOptions
     ): Promise<T> {
       calls.push({ messages, options });
       if (options.operation === "decision.repair.v1") {
