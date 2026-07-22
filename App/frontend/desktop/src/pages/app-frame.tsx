@@ -757,11 +757,6 @@ export function AppFrame(props: AppFrameProps) {
           })}
         </nav>
 
-        {state.agent.operationErrorsBySurface.sidebar && (
-          <div role="alert" className="mx-4 mt-3 text-xs text-status-error">
-            {state.agent.operationErrorsBySurface.sidebar.message}
-          </div>
-        )}
         <div ref={taskScrollRef} className={`app-frame-task-scroll mt-5 mx-4 flex-1 overflow-y-auto${taskScrollFade ? " app-frame-task-scroll--faded" : ""}`}>
           <div className="space-y-3">
             {!showingArchived && (

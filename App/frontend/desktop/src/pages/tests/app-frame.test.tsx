@@ -199,7 +199,7 @@ describe("AppFrame", () => {
     expect(source).not.toContain("dispatch(agentActions.transientSendFailed(chatId));");
     expect(source).not.toContain(removedOpenErrorSetter);
     expect(source).not.toContain(removedOpenErrorState);
-    expect(source).toContain('state.agent.operationErrorsBySurface.sidebar');
+    expect(source).not.toContain('state.agent.operationErrorsBySurface.sidebar');
   });
 
   it("bases rapid sidebar mutations on the latest optimistic state", () => {
