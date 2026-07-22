@@ -118,6 +118,7 @@ import {
   sourceMemoryIdsFromMemory,
   truncateDetailTitle
 } from "./read-model/memory.js";
+import { normalizeQueryRewriteQueries } from "./retrieval/query-rewrite.js";
 import { MemoryServiceError } from "../utils/error.js";
 import { newId, stableHash, stableStringify } from "../utils/id.js";
 import {
@@ -2906,7 +2907,7 @@ export class MemoryService {
           jsonMode: true
         }
       );
-      const queries = normalizeQueryRewriteQueries(result.queries);
+      const queries = normalizeQueryRewriteQueries(result.queries, QUERY_REWRITE_COUNT);
       return queries.length > 0 ? queries : [raw];
     } catch {
       return [raw];
@@ -15647,23 +15648,6 @@ function capText(value: string, max: number): string {
 function capSkillPromptText(value: string, max: number): string {
   if (value.length <= max) return value;
   return `${value.slice(0, max)}…`;
-}
-
-function normalizeQueryRewriteQueries(value: unknown): string[] {
-  const items = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
-  const seen = new Set<string>();
-  const queries: string[] = [];
-  for (const item of items) {
-    if (typeof item !== "string") continue;
-    const query = singleLine(item).slice(0, 500);
-    if (!query) continue;
-    const key = query.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    queries.push(query);
-    if (queries.length >= QUERY_REWRITE_COUNT) break;
-  }
-  return queries;
 }
 
 function mergeRetrievalResults(retrievals: RetrievalResult[], limit: number): RetrievalResult {
