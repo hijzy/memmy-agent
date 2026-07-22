@@ -107,6 +107,17 @@ import {
   panelSourceDistribution,
   panelTagsForMemory
 } from "./read-model/panel.js";
+import {
+  detailFromMemory,
+  detailSummaryForMemory,
+  detailTitleForMemory,
+  firstDetailDisplayString,
+  memoryDetailWithLayerPayload,
+  memoryEtag,
+  procedureFromSkillMemory,
+  sourceMemoryIdsFromMemory,
+  truncateDetailTitle
+} from "./read-model/memory.js";
 import { MemoryServiceError } from "../utils/error.js";
 import { newId, stableHash, stableStringify } from "../utils/id.js";
 import {
@@ -13736,156 +13747,6 @@ function truncateEpisodeLine(value: string, maxChars = 220): string {
   return cleaned.length <= maxChars ? cleaned : `${cleaned.slice(0, maxChars - 3)}...`;
 }
 
-function detailFromMemory(memory: MemoryRow, processing?: MemoryProcessingRecord): MemoryDetailItem {
-  const sourceMemoryIds = memory.properties.internal_info.source_memory_ids;
-  const source = panelSourceForMemory(memory);
-  return {
-    id: memory.id,
-    kind: kindFromMemory(memory),
-    memoryLayer: memory.memoryLayer,
-    status: memory.status,
-    title: detailTitleForMemory(memory),
-    summary: detailSummaryForMemory(memory),
-    tags: panelTagsForMemory(memory, processing),
-    updatedAt: memory.updatedAt,
-    version: memory.version,
-    processing,
-    body: memory.memoryValue,
-    createdAt: memory.createdAt,
-    sourceMemoryIds: stringArray(sourceMemoryIds),
-    metadata: {
-      source,
-      info: memory.info,
-      properties: memory.properties
-    }
-  };
-}
-
-function detailTitleForMemory(memory: MemoryRow): string {
-  const trace = traceMetaFromMemory(memory);
-  const policy = policyMetaFromMemory(memory);
-  const worldModel = worldModelMetaFromMemory(memory);
-  const skill = skillMetaFromMemory(memory);
-  const title = firstDetailDisplayString(
-    stringFromMaybeRecord(memory.info, "title"),
-    stringFromMaybeRecord(memory.properties.internal_info, "title"),
-    trace?.summary,
-    policy?.title,
-    worldModel?.title,
-    skill?.name,
-    firstReadableDetailMemoryLine(memory.memoryValue),
-    isInternalMemoryKeyForDisplay(memory.memoryKey) ? undefined : memory.memoryKey
-  );
-
-  return truncateDetailTitle(title ?? memory.id);
-}
-
-function detailSummaryForMemory(memory: MemoryRow): string {
-  const trace = traceMetaFromMemory(memory);
-  const policy = policyMetaFromMemory(memory);
-  const worldModel = worldModelMetaFromMemory(memory);
-  const skill = skillMetaFromMemory(memory);
-  return firstDetailDisplayString(
-    stringFromMaybeRecord(memory.info, "summary"),
-    stringFromMaybeRecord(memory.properties.internal_info, "summary"),
-    trace?.summary,
-    policy?.trigger,
-    policy?.procedure,
-    worldModel?.body,
-    worldModel?.title,
-    skill?.invocationGuide,
-    firstReadableDetailMemoryLine(memory.memoryValue),
-    firstLine(memory.memoryValue)
-  ) ?? "";
-}
-
-function firstDetailDisplayString(...values: Array<string | undefined | null>): string | undefined {
-  return values
-    .map(cleanDetailDisplayText)
-    .find((value): value is string => Boolean(value && !isWorldSectionHeadingForDisplay(value) && !isInternalMemoryKeyForDisplay(value)));
-}
-
-function firstReadableDetailMemoryLine(value: string): string | undefined {
-  return value
-    .split(/\r?\n/)
-    .map(cleanDetailDisplayText)
-    .find((line): line is string => Boolean(line && !isWorldSectionHeadingForDisplay(line) && !isInternalMemoryKeyForDisplay(line)));
-}
-
-function cleanDetailDisplayText(value?: string | null): string | undefined {
-  const text = (value ?? "")
-    .replace(/^\s*Summary:\s*/i, "")
-    .replace(/^\s*#{1,6}\s+/, "")
-    .replace(/^\s*[-*]\s+/, "")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .trim();
-  return text || undefined;
-}
-
-function isWorldSectionHeadingForDisplay(value: string): boolean {
-  return /^(Environment|Inference|Constraints|Environment Knowledge|环境|环境拓扑|行为规律|约束禁忌|结构化认知)$/i.test(value.trim());
-}
-
-function isInternalMemoryKeyForDisplay(value?: string | null): boolean {
-  return Boolean(value && /^(trace|policy|world|world_model|skill)[:_]/i.test(value.trim()));
-}
-
-function truncateDetailTitle(value: string): string {
-  return value.length <= 80 ? value : `${value.slice(0, 77)}...`;
-}
-
-function memoryDetailWithLayerPayload(detail: MemoryDetailItem, memory: MemoryRow): MemoryDetailItem & Record<string, unknown> {
-  const item: MemoryDetailItem & Record<string, unknown> = { ...detail };
-  if (memory.memoryLayer === "L1") {
-    const trace = traceMetaFromMemory(memory);
-    const tracePayload = {
-      episodeId: trace?.episodeId ?? stringFromMaybeRecord(memory.info, "episode_id") ?? "",
-      rawTurnId: rawTurnIdFromMemory(memory) ?? "",
-      turnId: trace?.turnId ?? stringFromMaybeRecord(memory.info, "turn_id") ?? ""
-    };
-    if (tracePayload.episodeId && tracePayload.rawTurnId && tracePayload.turnId) {
-      item.trace = tracePayload;
-    }
-  } else if (memory.memoryLayer === "L2") {
-    const policy = policyMetaFromMemory(memory);
-    item.policy = {
-      utilityScore: policy?.gain,
-      confidence: policy?.confidence,
-      evidenceMemoryIds: policy?.sourceTraceIds ?? sourceMemoryIdsFromMemory(memory),
-      repairHints: policy?.verification ? [policy.verification] : []
-    };
-  } else if (memory.memoryLayer === "L3") {
-    const worldModel = worldModelMetaFromMemory(memory);
-    item.worldModel = {
-      sourceMemoryIds: worldModel?.policyIds ?? sourceMemoryIdsFromMemory(memory),
-      confidence: worldModel?.confidence
-    };
-  } else if (memory.memoryLayer === "Skill") {
-    const skill = skillMetaFromMemory(memory);
-    item.skill = {
-      invocationGuide: skill?.invocationGuide ?? detail.body,
-      procedure: procedureFromSkillMemory(memory),
-      sourcePolicyIds: skill?.sourcePolicyIds ?? [],
-      sourceWorldModelIds: skill?.sourceWorldModelIds ?? [],
-      reliabilityScore: skill?.eta,
-      utilityScore: skill?.eta,
-      evidenceCount: skill?.evidenceAnchorIds.length
-    };
-  }
-  return item;
-}
-
-function memoryEtag(memory: MemoryRow): string {
-  return `${memory.id}-v${memory.version}`;
-}
-
-function sourceMemoryIdsFromMemory(memory: MemoryRow): string[] {
-  return stringArrayFromInternal(memory, "source_memory_ids")
-    .concat(stringArrayFromInternal(memory, "source_l1_memory_ids"))
-    .concat(stringArrayFromInternal(memory, "source_policy_ids"))
-    .concat(stringArrayFromInternal(memory, "evidence_anchor_ids"));
-}
-
 function memoryMatchesTags(memory: MemoryRow, tags: string[] | undefined): boolean {
   const requested = (tags ?? [])
     .map((tag) => tag.trim().toLowerCase())
@@ -14008,33 +13869,6 @@ function scopeBundleTables(
 ): Record<string, Array<Record<string, unknown>>> {
   void namespace;
   return tables;
-}
-
-function stringArrayFromInternal(memory: MemoryRow, key: string): string[] {
-  const value = memory.properties.internal_info[key];
-  return stringArray(value);
-}
-
-function procedureFromSkillMemory(memory: MemoryRow): string[] | undefined {
-  const internal = memory.properties.internal_info;
-  const value = internal.procedure_json ?? internal.procedure;
-  if (Array.isArray(value)) {
-    return value.filter((item): item is string => typeof item === "string");
-  }
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value) as unknown;
-      if (Array.isArray(parsed)) {
-        return parsed.filter((item): item is string => typeof item === "string");
-      }
-    } catch {
-      return value
-        .split(/\r?\n/)
-        .map((line) => line.replace(/^[-*]\s*/, "").trim())
-        .filter(Boolean);
-    }
-  }
-  return undefined;
 }
 
 interface SkillUsageStats {
