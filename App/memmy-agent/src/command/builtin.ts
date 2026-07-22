@@ -8,6 +8,7 @@ import {
   type ManagedRestartNotice
 } from "../utils/restart.js";
 import { handlePairingCommand } from "../integrations/channel-auth/store.js";
+import { DEFAULT_MAX_TOKENS } from "../token-budget.js";
 import { buildStatusContent } from "../utils/helpers.js";
 import { fetchSearchUsage } from "../utils/searchusage.js";
 import { buildHistoryDagPayload, renderHistoryDagSummary, SessionDagStore } from "../session-dag/index.js";
@@ -405,7 +406,10 @@ export async function cmdStatus(ctx: CommandContext): Promise<OutboundMessage> {
     typeof session?.getHistory === "function"
       ? session.getHistory({ maxMessages: 0 }).length
       : session?.messages?.filter((message: any) => !message.commandMessage).length ?? 0;
-  const maxCompletionTokens = loop?.provider?.generation?.max_tokens ?? loop?.provider?.generation?.maxTokens ?? loop?.config?.agents?.defaults?.maxTokens ?? 8192;
+  const maxCompletionTokens = loop?.provider?.generation?.max_tokens
+    ?? loop?.provider?.generation?.maxTokens
+    ?? loop?.config?.agents?.defaults?.maxTokens
+    ?? DEFAULT_MAX_TOKENS;
 
   return reply(
     ctx,

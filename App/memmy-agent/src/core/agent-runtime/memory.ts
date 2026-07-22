@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { estimateMessageTokens, Session } from "../session/manager.js";
+import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
 import { GitStore } from "../../utils/gitstore.js";
 import { ensureDir, estimatePromptTokensChain, stripThink, truncateText } from "../../utils/helpers.js";
 import { renderTemplate } from "../../utils/prompt-templates.js";
@@ -551,7 +552,7 @@ type ConsolidatorInit = {
 
 export class Consolidator {
   static MAX_CONSOLIDATION_ROUNDS = 5;
-  static SAFETY_BUFFER = 1024;
+  static SAFETY_BUFFER = CONTEXT_SAFETY_BUFFER_TOKENS;
 
   store: MemoryStore;
   provider: any;
