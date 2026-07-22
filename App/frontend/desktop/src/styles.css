@@ -3552,6 +3552,13 @@ code {
   margin-top: 14px;
 }
 
+.memory-processing-failure__retry-error {
+  margin: 12px 0 0;
+  color: var(--color-status-error);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .memory-processing-action {
   display: inline-flex;
   align-items: center;
