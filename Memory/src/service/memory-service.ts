@@ -66,7 +66,11 @@ import {
   IMPORT_DEFAULT_ALPHA,
   IMPORT_DEFAULT_PRIORITY,
   IMPORT_DEFAULT_VALUE,
+  IMPORT_FAILED_TAG,
+  IMPORT_INDEXING_TAG,
   IMPORT_SUMMARY_QUEUED_TAG,
+  IMPORT_SUMMARY_PROCESSING_TAG,
+  IMPORT_STATUS_TAGS,
   isAgentSourceImportMemoryAdd,
   memoryAddImportTrace,
   memoryAddKey,
@@ -96,6 +100,13 @@ import {
   panelRoundInt,
   panelToolLatency
 } from "./read-model/model-costs.js";
+import {
+  panelCountByDate,
+  panelListItemFromMemory,
+  panelSourceForMemory,
+  panelSourceDistribution,
+  panelTagsForMemory
+} from "./read-model/panel.js";
 import { MemoryServiceError } from "../utils/error.js";
 import { newId, stableHash, stableStringify } from "../utils/id.js";
 import {
@@ -321,18 +332,6 @@ type SkillEnhancementResult =
   | { ok: true; draft: SkillDraft }
   | { ok: false; reason: string };
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
-const IMPORT_SUMMARY_PROCESSING_TAG = "摘要总结中";
-const IMPORT_INDEXING_TAG = "索引建立中";
-const IMPORT_FAILED_TAG = "处理失败";
-const IMPORT_STATUS_TAGS = [
-  IMPORT_SUMMARY_QUEUED_TAG,
-  "摘要整理中",
-  IMPORT_SUMMARY_PROCESSING_TAG,
-  "建立索引中",
-  IMPORT_INDEXING_TAG,
-  "索引已建立",
-  IMPORT_FAILED_TAG
-];
 const SUMMARY_WORKER_CONCURRENCY = 4;
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
 type WorldModelMeta = NonNullable<ReturnType<typeof worldModelMetaFromMemory>>;
@@ -13737,22 +13736,6 @@ function truncateEpisodeLine(value: string, maxChars = 220): string {
   return cleaned.length <= maxChars ? cleaned : `${cleaned.slice(0, maxChars - 3)}...`;
 }
 
-function panelListItemFromMemory(
-  item: MemoryListItem,
-  memory: MemoryRow,
-  processing?: MemoryProcessingRecord
-): MemoryListItem {
-  return {
-    ...item,
-    processing,
-    metadata: {
-      ...(item.metadata ?? {}),
-      source: panelSourceForMemory(memory)
-    },
-    tags: panelTagsForMemory(memory, processing)
-  };
-}
-
 function detailFromMemory(memory: MemoryRow, processing?: MemoryProcessingRecord): MemoryDetailItem {
   const sourceMemoryIds = memory.properties.internal_info.source_memory_ids;
   const source = panelSourceForMemory(memory);
@@ -16515,113 +16498,6 @@ function dedupeCaseInsensitiveStrings(values: string[]): string[] {
     out.push(trimmed);
   }
   return out;
-}
-
-function panelSourceDistribution(memories: MemoryRow[]): Array<{ source: string; count: number; percentage: number }> {
-  const counts = new Map<string, number>();
-  for (const memory of memories) {
-    const source = panelSourceForMemory(memory);
-    counts.set(source, (counts.get(source) ?? 0) + 1);
-  }
-
-  return Array.from(counts.entries())
-    .map(([source, count]) => ({
-      source,
-      count,
-      percentage: memories.length > 0 ? panelRoundDecimal((count / memories.length) * 100, 1) : 0
-    }))
-    .sort((a, b) => b.count - a.count || a.source.localeCompare(b.source));
-}
-
-function panelTagsForMemory(memory: MemoryRow, processing?: MemoryProcessingRecord): string[] {
-  return panelStatusTagsForMemory(memory, processing);
-}
-
-function panelStatusTagsForMemory(memory: MemoryRow, processing?: MemoryProcessingRecord): string[] {
-  const tags = memory.tags.filter((tag) => !IMPORT_STATUS_TAGS.includes(tag));
-  if (memory.status === "archived" || memory.status === "deleted" || !processing) {
-    return tags;
-  }
-  const label = processing.state === "summary_pending" || processing.state === "summarizing"
-    ? IMPORT_SUMMARY_PROCESSING_TAG
-    : processing.state === "embedding_pending" || processing.state === "embedding"
-      ? IMPORT_INDEXING_TAG
-      : processing.state === "failed"
-        ? IMPORT_FAILED_TAG
-        : undefined;
-  return label ? uniq([...tags, label]) : tags;
-}
-
-function panelSourceForMemory(memory: MemoryRow): string {
-  const internalInfo: Record<string, unknown> = isRecord(memory.properties.internal_info)
-    ? memory.properties.internal_info
-    : {};
-  const explicitSources = [memory.info.source, internalInfo.source];
-  const explicitSource = firstString(...explicitSources.map(panelNormalizeExplicitSource));
-  if (explicitSource) return explicitSource;
-
-  const hostSource = firstString(
-    panelNormalizeKnownSource(memory.sessionId),
-    panelNormalizeKnownSource(memory.conversationId),
-    panelNormalizeSourceAgent(memory.agentId),
-    panelNormalizeSourceAgent(memory.appId)
-  );
-  if (hostSource) return hostSource;
-
-  return explicitSources.some(panelIsInternalSourceValue) ? "memmy" : "unknown";
-}
-
-function panelNormalizeExplicitSource(value: unknown): string | undefined {
-  if (typeof value !== "string" || !value.trim()) {
-    return undefined;
-  }
-
-  const normalized = value.trim().toLowerCase();
-  if (panelIsInternalSource(normalized)) return undefined;
-  return panelNormalizeKnownSource(normalized) ?? normalized;
-}
-
-function panelNormalizeKnownSource(value: unknown): string | undefined {
-  if (typeof value !== "string" || !value.trim()) {
-    return undefined;
-  }
-
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "claude" || normalized.startsWith("claude-")) return "claude-code";
-  if (normalized === "open-code" || normalized.startsWith("open-code-")) return "opencode";
-  for (const source of ["hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "manual", "memmy"]) {
-    if (normalized === source || normalized.startsWith(`${source}-`)) return source;
-  }
-  return undefined;
-}
-
-function panelNormalizeSourceAgent(value: unknown): string | undefined {
-  if (typeof value !== "string" || !value.trim()) return undefined;
-  const normalized = value.trim().toLowerCase();
-  return panelNormalizeKnownSource(normalized) ?? normalized;
-}
-
-function panelIsInternalSourceValue(value: unknown): boolean {
-  return typeof value === "string" && panelIsInternalSource(value.trim().toLowerCase());
-}
-
-function panelIsInternalSource(value: string): boolean {
-  return /^(?:turn|worker|panel|system|feedback|memory|session|episode|recall|skill_trial|l2_candidate)(?:[.:_-]|$)/.test(value);
-}
-
-function panelCountByDate<T>(
-  rows: T[],
-  dates: string[],
-  getTime: (row: T) => string | undefined
-): Array<{ date: string; count: number }> {
-  const counts = new Map(dates.map((date) => [date, 0]));
-  for (const row of rows) {
-    const key = panelDateKey(getTime(row));
-    if (counts.has(key)) {
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-  }
-  return dates.map((date) => ({ date, count: counts.get(date) ?? 0 }));
 }
 
 function firstString(...values: unknown[]): string | undefined {

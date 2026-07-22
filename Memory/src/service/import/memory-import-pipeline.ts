@@ -4,6 +4,18 @@ import { MemoryServiceError } from "../../utils/error.js";
 import { stableHash } from "../../utils/id.js";
 
 export const IMPORT_SUMMARY_QUEUED_TAG = "摘要排队中";
+export const IMPORT_SUMMARY_PROCESSING_TAG = "摘要总结中";
+export const IMPORT_INDEXING_TAG = "索引建立中";
+export const IMPORT_FAILED_TAG = "处理失败";
+export const IMPORT_STATUS_TAGS = [
+  IMPORT_SUMMARY_QUEUED_TAG,
+  "摘要整理中",
+  IMPORT_SUMMARY_PROCESSING_TAG,
+  "建立索引中",
+  IMPORT_INDEXING_TAG,
+  "索引已建立",
+  IMPORT_FAILED_TAG
+];
 export const IMPORT_DEFAULT_ALPHA = 0;
 export const IMPORT_DEFAULT_VALUE = 0;
 export const IMPORT_DEFAULT_PRIORITY = 0.5;
