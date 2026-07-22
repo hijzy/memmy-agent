@@ -3192,7 +3192,7 @@ function formatQuotaNextAllowedAt(epochMs: number, language: "zh-CN" | "en-US"):
   const date = new Date(epochMs);
   if (language === "zh-CN") {
     const pad = (value: number) => String(value).padStart(2, "0");
-    return `${date.getMonth() + 1} 月 ${date.getDate()} 日 ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    return `${date.getMonth() + 1} \u6708 ${date.getDate()} \u65e5 ${pad(date.getHours())}:${pad(date.getMinutes())}`;
   }
 
   return new Intl.DateTimeFormat("en-US", {
