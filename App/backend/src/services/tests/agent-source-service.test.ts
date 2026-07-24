@@ -1,5 +1,9 @@
 /** Agent source service tests. */
 import { DatabaseSync } from "node:sqlite";
+import { MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH } from "@memmy/local-api-contracts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createSourceRegistry } from "../../adapters/outbound/agent-source/source-registry.js";
 import type {
@@ -16,10 +20,15 @@ import { createAgentSourceService, type AgentSourceService } from "../agent-sour
 import type { SkillDistributionService } from "../skill-distribution-service.js";
 
 let db: DatabaseSync | undefined;
+let tempDir: string | undefined;
 
 afterEach(() => {
   db?.close();
   db = undefined;
+  if (tempDir) {
+    rmSync(tempDir, { recursive: true, force: true });
+    tempDir = undefined;
+  }
 });
 
 describe("agent source service", () => {
@@ -613,18 +622,201 @@ describe("agent source service", () => {
     const service = createService();
 
     const added = await service.addManual({
-      displayName: "Manual Agent",
-      dataPath: "/tmp/manual-agent"
+      displayName: "Manual Agent"
     });
     await service.remove(added.sourceId);
 
     expect(added).toMatchObject({
       displayName: "Manual Agent",
-      dataPath: "/tmp/manual-agent",
+      dataPath: MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH,
       builtin: false
     });
     await expect(service.list()).resolves.not.toEqual(
       expect.arrayContaining([expect.objectContaining({ sourceId: added.sourceId })])
+    );
+  });
+
+  it("imports AI-normalized history and records the 500th-turn sync boundary", async () => {
+    const repository = createRepository();
+    const ingested: ConversationMessage[] = [];
+    let memorySource: string | undefined;
+    const service = createService({
+      repository,
+      ingestionService: {
+        async ingest(messages, context) {
+          memorySource = context.memorySource;
+          for await (const message of messages) {
+            ingested.push(message);
+          }
+          return {
+            attempted: ingested.length,
+            written: ingested.length,
+            deduped: 0,
+            failed: 0,
+            writtenMemories: 1,
+            dedupedMemories: 0,
+            failedMemories: 0,
+            memoryIds: [],
+            conversations: 1,
+            completedConversationIds: ["conversation-1"],
+            incompleteConversationIds: [],
+            failedConversationIds: [],
+            errors: []
+          };
+        }
+      }
+    });
+    const source = await service.addManual({ displayName: "Aider" });
+
+    const result = await service.importManaged(source.sourceId, {
+      mode: "initial_subset",
+      dataPath: "/Users/test/.aider/history.jsonl",
+      syncBoundaryAt: "2026-07-01T10:00:00.000Z",
+      final: true,
+      messages: [
+        {
+          messageId: "user-1",
+          conversationId: "conversation-1",
+          role: "user",
+          content: "question",
+          createdAt: "2026-07-01T10:00:00.000Z"
+        },
+        {
+          messageId: "assistant-1",
+          conversationId: "conversation-1",
+          role: "assistant",
+          content: "answer",
+          createdAt: "2026-07-01T10:00:01.000Z"
+        }
+      ]
+    });
+
+    expect(ingested.map((message) => message.sourceId)).toEqual([source.sourceId, source.sourceId]);
+    expect(memorySource).toBe("Aider");
+    expect(result).toMatchObject({
+      sourceId: source.sourceId,
+      attempted: 2,
+      written: 2,
+      syncBoundaryAt: "2026-07-01T10:00:00.000Z",
+      errors: []
+    });
+    await expect(service.list()).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        sourceId: source.sourceId,
+        dataPath: "/Users/test/.aider/history.jsonl",
+        lastScannedAt: "2026-05-28T10:00:00.000Z",
+        syncBoundaryAt: "2026-07-01T10:00:00.000Z"
+      })
+    ]));
+  });
+
+  it("persists the AI-discovered recipe and later syncs without another Agent session", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-managed-sync-"));
+    const historyPath = join(tempDir, "history.jsonl");
+    writeFileSync(historyPath, [
+      JSON.stringify({ id: "u1", conversation: "c1", role: "user", content: "old", createdAt: "2026-07-01T10:00:00.000Z" }),
+      JSON.stringify({ id: "a1", conversation: "c1", role: "assistant", content: "old answer", createdAt: "2026-07-01T10:00:01.000Z" }),
+      JSON.stringify({ id: "u2", conversation: "c1", role: "user", content: "new", createdAt: "2026-07-02T10:00:00.000Z" }),
+      JSON.stringify({ id: "a2", conversation: "c1", role: "assistant", content: "new answer", createdAt: "2026-07-02T10:00:01.000Z" })
+    ].join("\n"), "utf8");
+    const repository = createRepository();
+    const ingestionCalls: ConversationMessage[][] = [];
+    const service = createService({
+      repository,
+      ingestionService: {
+        async ingest(messages) {
+          const ingested: ConversationMessage[] = [];
+          for await (const message of messages) ingested.push(message);
+          ingestionCalls.push(ingested);
+          return {
+            attempted: ingested.length,
+            written: ingested.length,
+            deduped: 0,
+            failed: 0,
+            writtenMemories: ingested.length > 0 ? 1 : 0,
+            dedupedMemories: 0,
+            failedMemories: 0,
+            memoryIds: [],
+            conversations: ingested.length > 0 ? 1 : 0,
+            completedConversationIds: ingested.length > 0 ? ["c1"] : [],
+            incompleteConversationIds: [],
+            failedConversationIds: [],
+            errors: []
+          };
+        }
+      }
+    });
+    const source = await service.addManual({ displayName: "Example Agent" });
+    await service.importManaged(source.sourceId, {
+      mode: "initial_subset",
+      messages: [
+        {
+          messageId: "u1",
+          conversationId: "c1",
+          role: "user",
+          content: "old",
+          createdAt: "2026-07-01T10:00:00.000Z"
+        },
+        {
+          messageId: "a1",
+          conversationId: "c1",
+          role: "assistant",
+          content: "old answer",
+          createdAt: "2026-07-01T10:00:01.000Z"
+        }
+      ],
+      syncBoundaryAt: "2026-07-01T10:00:00.000Z",
+      final: true
+    });
+    const updated = await service.updateManaged(source.sourceId, {
+      dataPath: historyPath,
+      syncRecipe: {
+        version: 1,
+        format: "jsonl",
+        path: historyPath,
+        fields: {
+          messageId: "id",
+          conversationId: "conversation",
+          role: "role",
+          content: "content",
+          createdAt: "createdAt"
+        },
+        timestampFormat: "auto"
+      }
+    });
+
+    const result = await service.syncManaged(source.sourceId);
+
+    expect(updated.syncReady).toBe(true);
+    expect(ingestionCalls.at(-1)?.map((message) => message.messageId)).toEqual(["u2", "a2"]);
+    expect(result).toMatchObject({
+      attempted: 2,
+      written: 2,
+      syncBoundaryAt: "2026-07-01T10:00:00.000Z"
+    });
+  });
+
+  it("updates Skill state only for AI-managed sources", async () => {
+    const repository = createRepository();
+    repository.upsertSource({
+      sourceId: "cursor",
+      displayName: "Cursor",
+      dataPath: "/tmp/cursor",
+      builtin: true
+    });
+    const service = createService({ repository });
+    const source = await service.addManual({ displayName: "Aider" });
+
+    await expect(service.updateManaged(source.sourceId, {
+      dataPath: "/Users/test/.aider",
+      skillInstalled: true
+    })).resolves.toMatchObject({
+      sourceId: source.sourceId,
+      dataPath: "/Users/test/.aider",
+      status: "skill_installed"
+    });
+    await expect(service.updateManaged("cursor", { skillInstalled: true })).rejects.toThrow(
+      "not managed by Memmy Agent"
     );
   });
 
@@ -787,6 +979,7 @@ function createRepository(): AgentSourceRepository {
       builtin         INTEGER NOT NULL CHECK(builtin IN (0,1)),
       status          TEXT NOT NULL DEFAULT 'not_connected',
       last_scanned_at TEXT,
+      sync_recipe_json TEXT,
       created_at      TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (uuid, source_id)

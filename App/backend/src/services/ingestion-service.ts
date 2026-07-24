@@ -15,6 +15,7 @@ export interface IngestionService {
 /** Contract for ingestion context. */
 export interface IngestionContext {
   sourceId: string;
+  memorySource?: string;
   signal?: AbortSignal;
   deferProcessing?: boolean;
   totalMessages?: number;
@@ -144,6 +145,7 @@ async function processConversation(
   let processedTurns = 0;
   let incomplete = false;
   let failed = false;
+  const memorySource = ctx.memorySource ?? ctx.sourceId;
 
   for (const turn of splitConversationIntoTurns(messages)) {
     processedTurns += 1;
@@ -167,9 +169,9 @@ async function processConversation(
         adapterId: `agent-source:${ctx.sourceId}`,
         content: renderMessagesToMarkdown(turn.messages),
         layer: "L1",
-        title: titleForTurn(ctx.sourceId, turn),
-        tags: ["agent-source", ctx.sourceId],
-        source: ctx.sourceId,
+        title: titleForTurn(memorySource, turn),
+        tags: ["agent-source", memorySource],
+        source: memorySource,
         turnId: createStableTurnId(ctx.sourceId, turn),
         createdAt: turnCreatedAt(turn),
         ...(ctx.deferProcessing ? { deferProcessing: true } : {})

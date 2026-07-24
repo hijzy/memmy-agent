@@ -113,6 +113,37 @@ describe("ingestion service", () => {
     }));
   });
 
+  it("uses the user-entered Agent name as the L1 memory source when supplied", async () => {
+    const added: Array<Record<string, unknown>> = [];
+    const service = createService({
+      async addMemory(input) {
+        added.push(input as Record<string, unknown>);
+        return {
+          id: "memory-aider",
+          kind: "trace",
+          memoryLayer: "L1",
+          status: "activated",
+          title: input.title ?? "Imported conversation",
+          summary: input.content,
+          tags: input.tags ?? [],
+          createdAt: now(),
+          serverTime: now()
+        };
+      }
+    });
+
+    await service.ingest(
+      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2)]),
+      { sourceId: "manual-id-1", memorySource: "Aider" }
+    );
+
+    expect(added[0]).toEqual(expect.objectContaining({
+      adapterId: "agent-source:manual-id-1",
+      source: "Aider",
+      tags: ["agent-source", "Aider"]
+    }));
+  });
+
   it("keeps the trace identity stable while changing the idempotency key for revised content", async () => {
     const added: Array<{ requestId?: string; turnId?: string }> = [];
     const service = createService({
