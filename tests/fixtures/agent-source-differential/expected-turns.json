@@ -1,0 +1,101 @@
+[
+  {
+    "sourceId": "fixture-alpha",
+    "conversationId": "alpha-basic",
+    "adapterId": "agent-source:fixture-alpha",
+    "turnId": "fixture-alpha:8f3b62bf9dc8f2ce1250ae31",
+    "requestId": "52d224c3a4ef956cd550a12cbd0b042fefe7ebae53a4bd0bca269b728cf0e844",
+    "createdAt": "2026-05-10T08:00:00.000Z",
+    "contentSha256": "646f577c8a27b0b4dab40da165ab7ded6e6ff4ffec43b7e39c6629e7273cd308"
+  },
+  {
+    "sourceId": "fixture-alpha",
+    "conversationId": "alpha-basic",
+    "adapterId": "agent-source:fixture-alpha",
+    "turnId": "fixture-alpha:335684a244ef19f99f0ca4ea",
+    "requestId": "94cd3fb5aa8abeef22d19e8e7aa5cb686a2dd03029d0e2258ba7a2a3b45b9d3e",
+    "createdAt": "2026-05-10T08:01:00.000Z",
+    "contentSha256": "9a44447f174d2da83f47631d0b31cc9014eaeb2596af5aec749df56d7b93011f"
+  },
+  {
+    "sourceId": "fixture-alpha",
+    "conversationId": "alpha-leading-assistant",
+    "adapterId": "agent-source:fixture-alpha",
+    "turnId": "fixture-alpha:a78f680caf9fee17718abea2",
+    "requestId": "91040331dc1f9632e2e1ab54467763f2269343b1f7e925e39c226eb8d4979796",
+    "createdAt": "2026-05-14T12:00:10.000Z",
+    "contentSha256": "06f209da173db4be2c41749b9c8dac1fcea8c1b3b451201630141148b35f84db"
+  },
+  {
+    "sourceId": "fixture-alpha",
+    "conversationId": "alpha-same-timestamp",
+    "adapterId": "agent-source:fixture-alpha",
+    "turnId": "fixture-alpha:2d1594c52913d80c77a4949c",
+    "requestId": "2a656924d647c59139d81d4afd7e4a8f8b6e8d923458fd0ed2fd1ad6ed26880f",
+    "createdAt": "2026-05-16T14:00:00.000Z",
+    "contentSha256": "3edf963389e16e3d247aa3a3778e8cc1a488387dc4fea6a419e1954f177d5225"
+  },
+  {
+    "sourceId": "fixture-alpha",
+    "conversationId": "alpha-same-timestamp",
+    "adapterId": "agent-source:fixture-alpha",
+    "turnId": "fixture-alpha:783c97a5670476a48faa70f9",
+    "requestId": "34d7fd644e1ba0757260bd0a22dc5e4c2b82a1ee83af94c42771dbea12633542",
+    "createdAt": "2026-05-16T14:00:00.000Z",
+    "contentSha256": "cd25ce0153b5480c7867bd24e6930864eaeea634c0c8d2d28271e00f6d96d379"
+  },
+  {
+    "sourceId": "fixture-alpha",
+    "conversationId": "alpha-system",
+    "adapterId": "agent-source:fixture-alpha",
+    "turnId": "fixture-alpha:91793a7d9d12f76ca8176fa1",
+    "requestId": "587299c0b76e1302f5522b192bb6c994c2666293c59387c33aea17ae875ae633",
+    "createdAt": "2026-05-17T15:00:01.000Z",
+    "contentSha256": "686445c09b4f01a367812518fce1e1df8b4649c109a3b85ab6bfe81cfdcad9a1"
+  },
+  {
+    "sourceId": "fixture-alpha",
+    "conversationId": "alpha-tools",
+    "adapterId": "agent-source:fixture-alpha",
+    "turnId": "fixture-alpha:de7d12ec85266e35e84f183b",
+    "requestId": "ec2b4ea395dbc1b5ae399091bff91d26c8339738ccaa0e825863ff9ba0ef01b6",
+    "createdAt": "2026-05-11T09:00:00.000Z",
+    "contentSha256": "df9c54b2b3a5079571b09c4f4cd370ff622c39d36bd94699fc5d02589f3606d6"
+  },
+  {
+    "sourceId": "fixture-alpha",
+    "conversationId": "alpha-trailing-incomplete",
+    "adapterId": "agent-source:fixture-alpha",
+    "turnId": "fixture-alpha:5df11c6fb505a709697b2ab7",
+    "requestId": "380989dcd88d4665eb5c682d334a4866e9978016944732d56b944ce03712346f",
+    "createdAt": "2026-05-13T11:00:00.000Z",
+    "contentSha256": "87c24c00cfc88b13db39acba4990a0d9e88dd2b36d61ba2dbc8032bb2ee5ae4a"
+  },
+  {
+    "sourceId": "fixture-alpha",
+    "conversationId": "alpha-unordered",
+    "adapterId": "agent-source:fixture-alpha",
+    "turnId": "fixture-alpha:5a35f8da438d2c30b2e1d448",
+    "requestId": "09ab9d994b15fbd58473f81458fcb968646bf661055623d135d6ef65d3e4b383",
+    "createdAt": "2026-05-12T10:00:00.000Z",
+    "contentSha256": "c463ec54944aea5bdd6e3dcbdb2206229785c5d1668fb3318055ddaef04769ef"
+  },
+  {
+    "sourceId": "fixture-beta",
+    "conversationId": "beta-basic",
+    "adapterId": "agent-source:fixture-beta",
+    "turnId": "fixture-beta:4bd3e0d623d76c61a86e3017",
+    "requestId": "09c2187585c0c4f08f2a2d40399fc2be18a27a1225c425f2b95afc6760e50868",
+    "createdAt": "2026-05-18T16:00:00.000Z",
+    "contentSha256": "e8781ea57e5a63b3785d8844712f0308efbfaf77b4b870c78c9d9ff03fcf47c5"
+  },
+  {
+    "sourceId": "fixture-beta",
+    "conversationId": "beta-multiline",
+    "adapterId": "agent-source:fixture-beta",
+    "turnId": "fixture-beta:4ea37cde604025ba9fa86763",
+    "requestId": "8d025fea69a68390e56ebdee6cdc09fe35d0be19f0fbe59b06e5e5e8b10b0f67",
+    "createdAt": "2026-05-19T17:00:00.000Z",
+    "contentSha256": "ae2e47d206bc0a058276e72dfd044d4d5cceac31bcf56279bde71a158899c7c1"
+  }
+]
