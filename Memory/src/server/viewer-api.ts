@@ -51,6 +51,7 @@ export const VIEWER_API_ROUTES = [
   "DELETE /api/v1/agent-sources/:id/plugin",
   "POST /api/v1/agent-sources/:id/skill",
   "DELETE /api/v1/agent-sources/:id/skill",
+  "GET /api/v1/agent-sources/plugin-conflicts",
   "POST /api/v1/agent-sources/manual",
   "PATCH /api/v1/agent-sources/:id",
   "DELETE /api/v1/agent-sources/:id",
@@ -215,6 +216,9 @@ export async function routeViewerRequest(
   }
   if (method === "GET" && path === "/api/v1/agent-sources") {
     return { body: await context.agentSources.list() };
+  }
+  if (method === "GET" && path === "/api/v1/agent-sources/plugin-conflicts") {
+    return { body: await context.agentSources.detectPluginConflicts() };
   }
   if (method === "GET" && path === "/api/v1/system/cli") {
     return { body: await viewerCliStatus(context.viewerCli) };

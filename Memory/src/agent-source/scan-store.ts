@@ -8,7 +8,18 @@ const MAX_RECORD_BYTES = 64 * 1024 * 1024;
 const MAX_PAGE_BYTES = 8 * 1024 * 1024;
 
 export interface MemoryScanJobMeta { jobId: string; sourceId: string; mode: string; phase: string; createdAt: string; updatedAt: string; error?: string; }
-export interface MemoryAgentSourceScanStore extends ScanStore { readonly path: string; saveMeta(meta: MemoryScanJobMeta): void; getMeta(): MemoryScanJobMeta | null; remove(): void; }
+export interface MemoryAgentSourceScanStore extends ScanStore {
+  readonly path: string;
+  saveMeta(meta: MemoryScanJobMeta): void;
+  getMeta(): MemoryScanJobMeta | null;
+  /** How much a run is about to import, before it starts importing it. */
+  selectedTurnCount(sourceId?: string): number;
+  conversationCount(sourceId: string): number;
+  /** Seeds a new job with the boundaries earlier jobs already committed. */
+  saveCheckpoints(checkpoints: readonly ConversationCheckpoint[]): void;
+  listCheckpoints(sourceId: string): ConversationCheckpoint[];
+  remove(): void;
+}
 
 export async function openMemoryAgentSourceScanStore(path: string, job: MemoryScanJobMeta): Promise<MemoryAgentSourceScanStore> {
   await mkdir(dirname(path), { recursive: true });
@@ -62,6 +73,10 @@ export async function openMemoryAgentSourceScanStore(path: string, job: MemorySc
     },
     saveResult(r){db.prepare("INSERT INTO scan_results(source_id,conversation_id,memory_id,error) SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM scan_results WHERE source_id=? AND conversation_id=? AND memory_id IS ? AND error IS ?)").run(r.sourceId,r.conversationId,r.memoryId??null,r.error??null,r.sourceId,r.conversationId,r.memoryId??null,r.error??null);}, resultCount(s){const row=db.prepare(`SELECT COUNT(*) AS count FROM scan_results${s?" WHERE source_id=?":""}`).get(...(s?[s]:[])) as {count:number}; return Number(row.count);},
     results(sourceId,cursor,limit=100){const safeLimit=Math.min(500,Math.max(1,Math.floor(limit))); const numericCursor=Number(cursor); const safeCursor=Number.isFinite(numericCursor)&&numericCursor>=0?Math.floor(numericCursor):0; const rows=db.prepare("SELECT id,source_id AS sourceId,conversation_id AS conversationId,memory_id AS memoryId,error FROM scan_results WHERE source_id LIKE ? AND id>? ORDER BY id LIMIT ?").iterate(sourceId??"%",safeCursor,safeLimit) as Iterable<Record<string,unknown>>; return (function*(){for(const row of rows){const result={sourceId:String(row.sourceId),conversationId:String(row.conversationId),...(row.memoryId?{memoryId:String(row.memoryId)}:{}),...(row.error?{error:String(row.error)}:{})} as ScanStoredResult; Object.defineProperty(result,"cursor",{value:String(row.id),enumerable:false}); yield result;}})();},
+    selectedTurnCount(sourceId){const row=db.prepare(`SELECT COUNT(*) AS count FROM turn_meta WHERE selected=1${sourceId?" AND source_id=?":""}`).get(...(sourceId?[sourceId]:[])) as {count:number}; return Number(row.count);},
+    conversationCount(sourceId){const row=db.prepare("SELECT COUNT(*) AS count FROM conversation_meta WHERE source_id=?").get(sourceId) as {count:number}; return Number(row.count);},
+    saveCheckpoints(checkpoints){const tx=db.transaction(()=>{for(const checkpoint of checkpoints) store.saveCheckpoint(checkpoint);}); tx();},
+    listCheckpoints(sourceId){return db.prepare("SELECT source_id AS sourceId,conversation_id AS conversationId,last_message_id AS lastMessageId,last_created_at AS lastCreatedAt,content_hash AS contentHash,updated_at AS updatedAt FROM checkpoints WHERE source_id=?").all(sourceId) as ConversationCheckpoint[];},
     saveMeta(meta){db.prepare("UPDATE scan_meta SET job_id=@jobId,source_id=@sourceId,mode=@mode,phase=@phase,created_at=@createdAt,updated_at=@updatedAt,error=@error WHERE id=1").run({...meta,error:meta.error??null});},
     getMeta(){return (db.prepare("SELECT job_id AS jobId,source_id AS sourceId,mode,phase,created_at AS createdAt,updated_at AS updatedAt,error FROM scan_meta WHERE id=1").get() as MemoryScanJobMeta|undefined)??null;},
     close(){db.close();},

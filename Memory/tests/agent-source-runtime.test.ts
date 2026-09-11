@@ -10,6 +10,7 @@ import type { SourceAdapter } from "../src/agent-source/adapters/types.js";
 import { createSourceRegistry } from "../src/agent-source/adapters/source-registry.js";
 import { createCursorSkillTarget } from "../src/agent-source/integration/cursor/index.js";
 import { createSkillTargetRegistry } from "../src/agent-source/integration/target-registry.js";
+import type { SkillTarget } from "../src/agent-source/integration/types.js";
 import type { MemoryService } from "../src/service/memory-service.js";
 
 const roots: string[] = [];
@@ -366,10 +367,13 @@ describe("standalone Agent source executor", () => {
       jobId: null,
       sourceId: null,
       mode: null,
+      origin: null,
       progress: null,
       startedAt: null,
       completedAt: null,
-      error: null
+      error: null,
+      sources: [],
+      pendingAdditions: null
     });
   });
 
@@ -581,7 +585,45 @@ describe("standalone Agent source executor", () => {
     expect(readFileSync(join(cursorRoot, "hooks.json"), "utf8")).not.toContain("memmy-resume-hook.mjs");
     expect((await executor.list()).sources[0]?.status).toBe("not_connected");
   });
+
+  it("keeps collecting plugin conflicts past an Agent whose config cannot be read", async () => {
+    const root = tempRoot();
+    const conflict = {
+      sourceId: "openclaw",
+      displayName: "OpenClaw",
+      configPath: join(root, "config.json"),
+      installedPluginId: "other-memory"
+    };
+    const executor = createAgentSourceExecutor({
+      service: {} as MemoryService,
+      configPath: join(root, "config.yaml"),
+      statePath: join(root, "agent-sources.json"),
+      sourceRegistry: createSourceRegistry([]),
+      integrationRegistry: createSkillTargetRegistry([
+        skillTarget("hermes", async () => { throw new Error("config is not JSON"); }),
+        skillTarget("openclaw", async () => conflict),
+        skillTarget("codex", async () => null)
+      ])
+    });
+
+    expect(await executor.detectPluginConflicts()).toEqual({ conflicts: [conflict] });
+  });
 });
+
+function skillTarget(
+  targetId: string,
+  detectMemoryPluginConflict: NonNullable<SkillTarget["detectMemoryPluginConflict"]>
+): SkillTarget {
+  return {
+    targetId,
+    displayName: targetId,
+    resolveRootDirectory: async () => null,
+    install: async () => {},
+    uninstall: async () => {},
+    isInstalled: async () => false,
+    detectMemoryPluginConflict
+  };
+}
 
 async function waitForScan(executor: ReturnType<typeof createAgentSourceExecutor>): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {

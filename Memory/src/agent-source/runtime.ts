@@ -38,6 +38,7 @@ import {
   stableTurnIdentity,
   legacyTurnId,
   legacyTurnRequestId,
+  type ConversationCheckpoint,
   type ImportedTurn,
   type ScanStore
 } from "@memmy/agent-source-core";
@@ -72,6 +73,7 @@ import {
   type SkillTargetRegistry
 } from "./integration/target-registry.js";
 import { renderMemmyDefaultSkillManifest } from "./integration/templates/memmy-default.js";
+import type { MemoryPluginConflict } from "./integration/types.js";
 import { createWorkbuddySkillTarget } from "./integration/workbuddy/index.js";
 
 const logger = createMemoryLogger("agent-source");
@@ -97,15 +99,36 @@ export interface AgentSourceView {
   syncReady?: boolean;
 }
 
+/** Who asked for a scan, so a UI only reports progress for its own runs. */
+export type AgentSourceScanOrigin = "app" | "viewer" | "cli" | "automation";
+
+export interface AgentSourceScanSourceStats {
+  sourceId: string;
+  discoveredConversations: number;
+  emittedMessages: number;
+  written: number;
+  skipped: number;
+  errorCount: number;
+}
+
 export interface AgentSourceScanState {
   running: boolean;
   jobId: string | null;
   sourceId: string | null;
   mode: "initial_subset" | "incremental" | "full" | null;
+  origin: AgentSourceScanOrigin | null;
   progress: ScanProgress | null;
   startedAt: string | null;
   completedAt: string | null;
   error: string | null;
+  /** Per-source counts, appended as each source finishes. */
+  sources: AgentSourceScanSourceStats[];
+  /**
+   * Set when a non-full run selected more turns than one run may import. The
+   * run waits in `stopped` until the caller restarts it, which approves the
+   * import.
+   */
+  pendingAdditions: { sourceId: string; selected: number; budget: number } | null;
 }
 
 export interface AgentSourceExecutor {
@@ -116,6 +139,8 @@ export interface AgentSourceExecutor {
   cancelScan(): Promise<{ ok: true }>;
   scanResults?(jobId: string, cursor?: string, limit?: number): Promise<{ items: Array<{ sourceId: string; conversationId: string; memoryId?: string; error?: string }>; nextCursor: string | null }>;
   mutateConnection(sourceId: string, kind: "plugin" | "skill", method: "POST" | "DELETE"): Promise<unknown>;
+  /** Reports Agents whose config already holds a competing memory plugin. */
+  detectPluginConflicts(): Promise<{ conflicts: MemoryPluginConflict[] }>;
   /** Registers a user-added Agent whose history format is not yet known. */
   addManualSource(input: unknown): Promise<AgentSourceView>;
   updateManualSource(sourceId: string, input: unknown): Promise<AgentSourceView>;
@@ -135,7 +160,21 @@ interface PersistedSourceState {
   messageCount: number;
   lastScannedAt: string | null;
   latestSeenAt: string | null;
+  /** The permanent first-sync boundary; never moves once recorded. */
+  baselineAt: string | null;
+  /**
+   * Where the last import stopped in each conversation. A job-scoped store
+   * used to hold these, so every new job re-imported the boundary turn.
+   */
+  checkpoints: Record<string, PersistedCheckpoint>;
   contentHash?: string;
+}
+
+interface PersistedCheckpoint {
+  lastMessageId: string;
+  lastCreatedAt: string;
+  contentHash: string;
+  updatedAt: string;
 }
 
 /**
@@ -168,6 +207,8 @@ export interface CreateAgentSourceExecutorOptions {
   /** Resolves the Agent root used for optional cross-Agent Skill ingestion. */
   resolveAgentSkillRoot?: (sourceId: string) => string | null;
   scanStoreDirectory?: string;
+  /** Turns one non-full run may import before it stops to ask. */
+  additionBudget?: number;
 }
 
 export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOptions): AgentSourceExecutor {
@@ -189,6 +230,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   let resumePausedScan: (() => void) | undefined;
   let disposed = false;
   let automationStarted = false;
+  let additionsApproved = false;
   const activeScans = new Set<Promise<void>>();
   let activeAutomation: Promise<void> | undefined;
 
@@ -215,7 +257,11 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         available,
         status: installed ? connectionStatus(adapter.descriptor.sourceId) : "not_connected",
         messageCount: stored?.messageCount ?? 0,
-        lastScannedAt: stored?.lastScannedAt ?? null
+        lastScannedAt: stored?.lastScannedAt ?? null,
+        syncBoundaryAt: stored?.baselineAt ?? null,
+        // An adapter knows its own format, so there is nothing to discover.
+        // Only manual sources can be "not ready yet".
+        syncReady: false
       };
     }));
     return {
@@ -394,9 +440,12 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       }
       const jobId = scan.jobId;
       scanPaused = false;
+      // Restarting the same run is how a caller answers "import N additions?".
+      additionsApproved = true;
       scan = {
         ...scan,
         running: true,
+        pendingAdditions: null,
         progress: progressBeforePause ?? {
           sourceId: request.sourceId,
           phase: "scan",
@@ -421,13 +470,17 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       jobId,
       sourceId: request.sourceId,
       mode: request.mode ?? null,
+      origin: request.origin,
       progress: null,
       startedAt: new Date().toISOString(),
       completedAt: null,
-      error: null
+      error: null,
+      sources: [],
+      pendingAdditions: null
     };
     activeScanRequest = request;
     progressBeforePause = null;
+    additionsApproved = false;
     const controller = new AbortController();
     scanAbortController = controller;
     const activeScan = runScan(request, controller.signal, jobId).then(() => {
@@ -502,7 +555,13 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         store.saveMeta({ jobId, sourceId: store.getMeta()?.sourceId ?? request.sourceId, mode, phase: "prepare", createdAt: store.getMeta()?.createdAt ?? new Date().toISOString(), updatedAt: new Date().toISOString() });
         const sourceState = store.getSourceState(sourceId);
         store.saveSourceState({ ...(sourceState ?? { sourceId, mode, messageCount: store.count(sourceId), resultCount: store.resultCount(sourceId), errorCount: stage.scanErrorCount, updatedAt: new Date().toISOString() }), phase: "prepare", updatedAt: new Date().toISOString() });
-        preparedContentHashes.set(sourceId, await prepareStandaloneSource(store, sourceId, mode, stage.stored.latestSeenAt, stage.stored.contentHash));
+        // Hand the job the boundaries earlier jobs committed, so prepare can
+        // tell an unchanged conversation from one with a new turn.
+        const checkpoints = Object.entries(stage.stored.checkpoints);
+        store.saveCheckpoints(checkpoints.map(([conversationId, checkpoint]) => ({
+          sourceId, conversationId, ...checkpoint
+        })));
+        preparedContentHashes.set(sourceId, await prepareStandaloneSource(store, sourceId, mode, stage.stored.latestSeenAt, checkpoints.length > 0, stage.stored.contentHash));
       }
       if (globalInitial) store.selectInitialTurns(stages.map((stage) => stage.sourceId), INITIAL_SCAN_MESSAGE_LIMIT, 200);
       for (const stage of stages) {
@@ -510,6 +569,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         signal.throwIfAborted();
         const { adapter, stored, mode, sourceId, staged } = stage;
         if (mode === "initial_subset" && !globalInitial) store.selectInitialTurns([sourceId], INITIAL_SCAN_MESSAGE_LIMIT, 0);
+        await waitForAdditionsApproval(store, sourceId, mode, signal);
         store.saveMeta({ jobId, sourceId: store.getMeta()?.sourceId ?? request.sourceId, mode, phase: "ingest", createdAt: store.getMeta()?.createdAt ?? new Date().toISOString(), updatedAt: new Date().toISOString() });
         const preparedState = store.getSourceState(sourceId);
         store.saveSourceState({ ...(preparedState ?? { sourceId, mode, messageCount: store.count(sourceId), resultCount: store.resultCount(sourceId), errorCount: stage.scanErrorCount, updatedAt: new Date().toISOString() }), phase: "ingest", updatedAt: new Date().toISOString() });
@@ -530,20 +590,36 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
           failures.push(detail);
         }
         const now = new Date().toISOString();
+        const clean = stage.scanErrorCount === 0 && result.errorCount === 0 && skillResult.errorCount === 0;
         state.sources[sourceId] = {
           ...stored,
           messageCount: mode === "incremental"
             ? stored.messageCount + result.messageCount
             : result.messageCount,
           lastScannedAt: now,
-          ...(stage.scanErrorCount === 0 && result.errorCount === 0 && skillResult.errorCount === 0 && preparedContentHashes.has(sourceId)
+          ...(clean && preparedContentHashes.has(sourceId)
             ? { contentHash: preparedContentHashes.get(sourceId) }
             : stored.contentHash ? { contentHash: stored.contentHash } : {}),
-          latestSeenAt: stage.scanErrorCount === 0 && result.errorCount === 0 && skillResult.errorCount === 0
+          latestSeenAt: clean
             ? (result.latestSeenAt ?? stored.latestSeenAt)
-            : stored.latestSeenAt
+            : stored.latestSeenAt,
+          // The boundary is whatever the first scan of this source saw; later
+          // scans must never move it, or the GUI's sync boundary would drift.
+          baselineAt: stored.baselineAt ?? (clean ? (result.latestSeenAt ?? stored.latestSeenAt) : null),
+          checkpoints: clean ? committedCheckpoints(store, sourceId) : stored.checkpoints
         };
         await persist(state);
+        scan = {
+          ...scan,
+          sources: [...scan.sources.filter((entry) => entry.sourceId !== sourceId), {
+            sourceId,
+            discoveredConversations: result.conversationCount,
+            emittedMessages: staged,
+            written: result.written,
+            skipped: result.skipped,
+            errorCount: sourceErrorCount
+          }]
+        };
         store.saveSourceState({
           sourceId,
           mode,
@@ -646,6 +722,35 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     }
   }
 
+  /**
+   * A routine incremental run should import a handful of turns. Thousands mean
+   * something moved the boundary, so the run stops and shows the number
+   * instead of quietly rewriting that much memory.
+   */
+  async function waitForAdditionsApproval(
+    store: MemoryAgentSourceScanStore,
+    sourceId: string,
+    mode: "initial_subset" | "incremental" | "full",
+    signal: AbortSignal
+  ): Promise<void> {
+    if (mode === "full" || additionsApproved) return;
+    const budget = options.additionBudget ?? INITIAL_SCAN_MESSAGE_LIMIT;
+    const selected = store.selectedTurnCount(sourceId);
+    if (selected <= budget) return;
+    const progress: ScanProgress = {
+      sourceId,
+      phase: "stopped",
+      current: 0,
+      total: selected,
+      message: `Found ${selected} new turns, more than the ${budget} one run may import`
+    };
+    progressBeforePause = progress;
+    scanPaused = true;
+    scan = { ...scan, running: false, progress, pendingAdditions: { sourceId, selected, budget } };
+    logger.info("scan.additions_pending", { sourceId, selected, budget });
+    await waitWhilePaused(signal);
+  }
+
   async function waitWhilePaused(signal: AbortSignal): Promise<void> {
     while (scanPaused) {
       await new Promise<void>((resolve, reject) => {
@@ -701,6 +806,24 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     return { ok: true, sourceId, status: state.sources[sourceId].status };
   }
 
+  /**
+   * Another memory plugin writing into the same Agent config fights ours over
+   * the same file, so the UI has to be able to say which Agent it found.
+   */
+  async function detectPluginConflicts(): Promise<{ conflicts: MemoryPluginConflict[] }> {
+    const conflicts: MemoryPluginConflict[] = [];
+    for (const target of integrationRegistry.list()) {
+      try {
+        const conflict = await target.detectMemoryPluginConflict?.();
+        if (conflict) conflicts.push(conflict);
+      } catch (error) {
+        // One unreadable Agent config must not hide the conflicts we did find.
+        logger.warn("plugin_conflict.detect_failed", { targetId: target.targetId, ...memoryErrorFields(error) });
+      }
+    }
+    return { conflicts };
+  }
+
   function scheduleAutomation(delay: number, startup: boolean): void {
     if (disposed) return;
     scanTimer = setTimeout(() => {
@@ -741,7 +864,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       }
     }
     const enabled = startup ? config.autoScanKnownAgents : config.watchFileChanges;
-    if (enabled && !disposed) await startScan({ sourceId: "all" });
+    if (enabled && !disposed) await startScan({ sourceId: "all", origin: "automation" });
   }
 
   return {
@@ -752,6 +875,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     cancelScan,
     scanResults,
     mutateConnection,
+    detectPluginConflicts,
     addManualSource,
     updateManualSource,
     removeManualSource,
@@ -1109,9 +1233,18 @@ async function ingestStagedMessages(
   signal: AbortSignal,
   onProgress: (progress: ScanProgress) => void,
   scheduleWorker?: () => void
-): Promise<{ written: number; messageCount: number; errors: string[]; errorCount: number; latestSeenAt: string | null }> {
+): Promise<{
+  written: number;
+  messageCount: number;
+  skipped: number;
+  conversationCount: number;
+  errors: string[];
+  errorCount: number;
+  latestSeenAt: string | null;
+}> {
   let written = 0;
   let messageCount = 0;
+  let skipped = 0;
   let processed = 0;
   let latestSeenAt: string | null = null;
   const errors: string[] = [];
@@ -1160,9 +1293,15 @@ async function ingestStagedMessages(
       activeConversationFailed = false;
     }
     const conversationMeta = store.getConversationMeta(sourceId, turn.conversationId);
-    if (conversationMeta?.selected === false) continue;
+    if (conversationMeta?.selected === false) {
+      skipped += turn.messages.length;
+      continue;
+    }
     const selectedTurn = store.getTurnMeta(sourceId, turn.conversationId, stableTurnIdentity(turn));
-    if (selectedTurn && !selectedTurn.selected) continue;
+    if (selectedTurn && !selectedTurn.selected) {
+      skipped += turn.messages.length;
+      continue;
+    }
     let succeeded = true;
     // One turn is one memory. Splitting an agentic turn fans a single exchange
     // out into hundreds of near-empty tool-call fragments, so an oversized turn
@@ -1175,7 +1314,8 @@ async function ingestStagedMessages(
         turnId: legacyTurnId(turn), createdAt: turn.messages[0]!.createdAt, deferProcessing: true
       });
       store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId: added.id });
-      if (!added.duplicate) { memoryIds.push(added.id); written += 1; }
+      if (added.duplicate) skipped += turn.messages.length;
+      else { memoryIds.push(added.id); written += 1; }
     } catch (error) {
       succeeded = false;
       activeConversationFailed = true;
@@ -1193,7 +1333,15 @@ async function ingestStagedMessages(
   }
   flush(true);
   commitConversation();
-  return { written, messageCount, errors, errorCount, latestSeenAt };
+  return {
+    written,
+    messageCount,
+    skipped,
+    conversationCount: store.conversationCount(sourceId),
+    errors,
+    errorCount,
+    latestSeenAt
+  };
 }
 
 async function prepareStandaloneSource(
@@ -1201,6 +1349,7 @@ async function prepareStandaloneSource(
   sourceId: string,
   mode: "initial_subset" | "incremental" | "full",
   latestSeenAt: string | null,
+  hasCheckpoints: boolean,
   previousContentHash?: string
 ): Promise<string> {
   let cursor: Parameters<ScanStore["messages"]>[1];
@@ -1212,6 +1361,7 @@ async function prepareStandaloneSource(
   const sourceHash = createHash("sha256");
   sourceHash.update("[");
   let firstSourceMessage = true;
+  let checkpoint: ConversationCheckpoint | null = null;
   const flushTurn = () => {
     if (!currentTurn.length || !isCompleteTurn(currentTurn)) return;
     const firstMessage = currentTurn[0]!;
@@ -1227,20 +1377,30 @@ async function prepareStandaloneSource(
       lastCreatedAt: lastMessage.createdAt,
       // A conversation may contain years of history but only one new turn.
       // Select turns at the watermark, not every turn in that conversation.
-      selected: mode !== "incremental" || !latestSeenAt ||
-        isAtOrAfter(lastMessage.createdAt, latestSeenAt)
+      //
+      // A checkpoint means everything up to it was committed, so comparing
+      // against it is strict. The watermark fallback has to include equality,
+      // because it is a max over turns that were imported and would otherwise
+      // drop a turn that shares its timestamp; that is why the turn sitting on
+      // the watermark used to be rewritten by every incremental run.
+      selected: mode !== "incremental" ? true
+        : checkpoint ? Date.parse(lastMessage.createdAt) > Date.parse(checkpoint.lastCreatedAt)
+        : !latestSeenAt || isAtOrAfter(lastMessage.createdAt, latestSeenAt)
     });
   };
   const flushConversation = () => {
     if (!currentConversation || !latest) return;
     hash.update("]");
-    const selected = mode !== "incremental" || !latestSeenAt || isAtOrAfter(latest.createdAt, latestSeenAt);
+    const contentHash = hash.digest("hex");
+    const selected = mode !== "incremental" ? true
+      : checkpoint ? checkpoint.contentHash !== contentHash
+      : !latestSeenAt || isAtOrAfter(latest.createdAt, latestSeenAt);
     store.saveConversationMeta({
       sourceId,
       conversationId: currentConversation,
       lastMessageId: latest.messageId,
       lastCreatedAt: latest.createdAt,
-      contentHash: hash.digest("hex"),
+      contentHash,
       selected
     });
   };
@@ -1252,6 +1412,7 @@ async function prepareStandaloneSource(
         flushTurn();
         flushConversation();
         currentConversation = message.conversationId;
+        checkpoint = store.getCheckpoint(sourceId, message.conversationId);
         currentTurn = [];
         hash = createHash("sha256");
         hash.update("[");
@@ -1286,8 +1447,28 @@ async function prepareStandaloneSource(
   flushConversation();
   sourceHash.update("]");
   const contentHash = sourceHash.digest("hex");
-  if (mode === "incremental" && previousContentHash !== contentHash) store.selectAllConversations(sourceId);
+  // Before checkpoints existed, a changed source could only be handled by
+  // reconsidering every conversation. Once a source has checkpoints, the
+  // per-conversation hashes say precisely which ones changed.
+  if (mode === "incremental" && previousContentHash !== contentHash && !hasCheckpoints) {
+    store.selectAllConversations(sourceId);
+  }
   return contentHash;
+}
+
+function committedCheckpoints(
+  store: MemoryAgentSourceScanStore,
+  sourceId: string
+): Record<string, PersistedCheckpoint> {
+  return Object.fromEntries(store.listCheckpoints(sourceId).map((checkpoint) => [
+    checkpoint.conversationId,
+    {
+      lastMessageId: checkpoint.lastMessageId,
+      lastCreatedAt: checkpoint.lastCreatedAt,
+      contentHash: checkpoint.contentHash,
+      updatedAt: checkpoint.updatedAt
+    } satisfies PersistedCheckpoint
+  ]));
 }
 
 function isAtOrAfter(value: string, boundary: string): boolean {
@@ -1428,13 +1609,17 @@ function titleForTurn(sourceId: string, messages: readonly ConversationMessage[]
 function normalizeScanInput(value: unknown): {
   sourceId: string;
   mode?: "initial_subset" | "incremental" | "full";
+  origin: AgentSourceScanOrigin;
 } {
   const input = record(value);
   const sourceId = typeof input.sourceId === "string" && input.sourceId.trim() ? input.sourceId.trim() : "all";
   const mode = input.mode === "initial_subset" || input.mode === "incremental" || input.mode === "full"
     ? input.mode
     : undefined;
-  return { sourceId, ...(mode ? { mode } : {}) };
+  const origin = input.origin === "app" || input.origin === "cli" || input.origin === "automation"
+    ? input.origin
+    : "viewer";
+  return { sourceId, origin, ...(mode ? { mode } : {}) };
 }
 
 function emptyScanState(): AgentSourceScanState {
@@ -1443,10 +1628,13 @@ function emptyScanState(): AgentSourceScanState {
     jobId: null,
     sourceId: null,
     mode: null,
+    origin: null,
     progress: null,
     startedAt: null,
     completedAt: null,
-    error: null
+    error: null,
+    sources: [],
+    pendingAdditions: null
   };
 }
 
@@ -1455,7 +1643,9 @@ function emptySourceState(): PersistedSourceState {
     status: "not_connected",
     messageCount: 0,
     lastScannedAt: null,
-    latestSeenAt: null
+    latestSeenAt: null,
+    baselineAt: null,
+    checkpoints: {}
   };
 }
 
@@ -1468,11 +1658,18 @@ async function loadState(path: string): Promise<PersistedState> {
     const sources = Object.fromEntries(Object.entries(sourceValues).map(([sourceId, raw]) => {
       const source = record(raw);
       const status = source.status === "skill_installed" || source.status === "plugin_installed" ? source.status : "not_connected";
+      const lastScannedAt = readIso(source.lastScannedAt);
+      const latestSeenAt = readIso(source.latestSeenAt);
       return [sourceId, {
         status,
         messageCount: typeof source.messageCount === "number" && Number.isFinite(source.messageCount) ? Math.max(0, Math.floor(source.messageCount)) : 0,
-        lastScannedAt: typeof source.lastScannedAt === "string" ? source.lastScannedAt : null,
-        latestSeenAt: typeof source.latestSeenAt === "string" ? source.latestSeenAt : null,
+        lastScannedAt,
+        latestSeenAt,
+        // A source scanned before boundaries were recorded gets its watermark
+        // as the boundary, so the max() in later merges is a no-op instead of
+        // dragging the cursor forward to today and skipping history.
+        baselineAt: readIso(source.baselineAt) ?? (lastScannedAt ? latestSeenAt : null),
+        checkpoints: readCheckpoints(source.checkpoints),
         ...(typeof source.contentHash === "string" ? { contentHash: source.contentHash } : {})
       } satisfies PersistedSourceState];
     }));
@@ -1487,6 +1684,31 @@ async function loadState(path: string): Promise<PersistedState> {
     if (isNodeError(error) && error.code === "ENOENT") return { version: 3, sources: {}, manual: {} };
     throw error;
   }
+}
+
+/**
+ * An unparsable timestamp must not survive a load. `isAtOrAfter` and the
+ * adapters treat a boundary they cannot parse as "no boundary", which lets a
+ * whole history through; dropping it falls back to the bounded first scan.
+ */
+function readIso(value: unknown): string | null {
+  return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+function readCheckpoints(value: unknown): Record<string, PersistedCheckpoint> {
+  return Object.fromEntries(Object.entries(record(value)).flatMap(([conversationId, raw]) => {
+    const checkpoint = record(raw);
+    const lastCreatedAt = readIso(checkpoint.lastCreatedAt);
+    if (!lastCreatedAt
+      || typeof checkpoint.lastMessageId !== "string"
+      || typeof checkpoint.contentHash !== "string") return [];
+    return [[conversationId, {
+      lastMessageId: checkpoint.lastMessageId,
+      lastCreatedAt,
+      contentHash: checkpoint.contentHash,
+      updatedAt: readIso(checkpoint.updatedAt) ?? lastCreatedAt
+    } satisfies PersistedCheckpoint]];
+  }));
 }
 
 /**

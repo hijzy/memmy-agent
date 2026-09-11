@@ -239,10 +239,13 @@ describe("local Viewer API", () => {
           jobId: "scan-1",
           sourceId: "codex",
           mode: null,
+          origin: "viewer",
           progress: { sourceId: "codex", phase: "scan", current: 3, total: 10 },
           startedAt: "2026-08-28T00:00:00.000Z",
           completedAt: null,
-          error: null
+          error: null,
+          sources: [],
+          pendingAdditions: null
         }),
         pauseScan,
         cancelScan
@@ -322,6 +325,22 @@ describe("local Viewer API", () => {
       body: JSON.stringify({ sourceId: "all" })
     });
     expect(scan.status).toBe(202);
+  });
+
+  it("reports competing memory plugins to the Viewer", async () => {
+    const conflict = {
+      sourceId: "openclaw",
+      displayName: "OpenClaw",
+      configPath: "/home/user/.openclaw/config.json",
+      installedPluginId: "other-memory"
+    };
+    const fixture = await startFixture({
+      agentSourceExecutor: stubExecutor({ detectPluginConflicts: async () => ({ conflicts: [conflict] }) })
+    });
+
+    const response = await viewerFetch(fixture.baseUrl, "/api/v1/agent-sources/plugin-conflicts");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ conflicts: [conflict] });
   });
 
   it("reports and installs the memmy-memory CLI through the local Viewer boundary", async () => {
@@ -613,12 +632,14 @@ function stubExecutor(overrides: Partial<AgentSourceExecutor> = {}): AgentSource
     list: async () => ({ executorAvailable: true, sources: [] }),
     startScan: async () => ({ accepted: true, jobId: "scan-1" }),
     scanStatus: () => ({
-      running: false, jobId: null, sourceId: null, mode: null,
-      progress: null, startedAt: null, completedAt: null, error: null
+      running: false, jobId: null, sourceId: null, mode: null, origin: null,
+      progress: null, startedAt: null, completedAt: null, error: null,
+      sources: [], pendingAdditions: null
     }),
     pauseScan: async () => ({ ok: true }),
     cancelScan: async () => ({ ok: true }),
     mutateConnection: async () => ({ ok: true }),
+    detectPluginConflicts: async () => ({ conflicts: [] }),
     addManualSource: unexpected("addManualSource"),
     updateManualSource: unexpected("updateManualSource"),
     removeManualSource: unexpected("removeManualSource"),

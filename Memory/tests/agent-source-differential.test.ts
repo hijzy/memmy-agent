@@ -63,14 +63,12 @@ describe("standalone Agent source scanner against the shared differential fixtur
     }
   });
 
-  // Known defect, frozen on purpose: the incremental boundary is inclusive
-  // (`isAtOrAfter`) and prepare never consults the saved conversation
-  // checkpoints, so every incremental scan hands the newest turn of each source
-  // back to addMemory, which rewrites that memory. The App scanner gates on
-  // checkpoints and re-adds nothing. Once the standalone prepare step consults
-  // checkpoints too, the expectation below must become an empty list. Anything
-  // beyond the newest turn per source is a regression toward mass re-import.
-  it("re-adds only the newest turn of each source on the next incremental scan", async () => {
+  // Re-adding an already imported turn is not a duplicate, it is a rewrite: it
+  // reactivates a memory the user archived, resets the summary to a
+  // placeholder, and changes the content hash, which drops the vectors and
+  // re-queues summarization. A scan that finds nothing new must call addMemory
+  // zero times, whichever scanner is running.
+  it("re-adds nothing on the next incremental scan", async () => {
     const harness = createHarness();
     try {
       await harness.executor.startScan({ sourceId: "all", mode: "full" });
@@ -82,8 +80,7 @@ describe("standalone Agent source scanner against the shared differential fixtur
       await waitForScan(harness.executor);
 
       expect(harness.executor.scanStatus().error).toBeNull();
-      const reAdded = harness.addMemory.mock.calls.slice(importedTurns).map(([input]) => input.turnId).sort();
-      expect(reAdded).toEqual(newestTurnIdPerSource(expectedTurns()));
+      expect(harness.addMemory.mock.calls.slice(importedTurns)).toEqual([]);
     } finally {
       await harness.executor.dispose();
     }
@@ -141,15 +138,6 @@ function observedTurns(addMemory: ReturnType<typeof createHarness>["addMemory"])
       contentSha256: createHash("sha256").update(input.content).digest("hex")
     }))
     .sort(compareObservedTurns);
-}
-
-function newestTurnIdPerSource(turns: readonly ObservedTurn[]): string[] {
-  const newest = new Map<string, ObservedTurn>();
-  for (const turn of turns) {
-    const current = newest.get(turn.sourceId);
-    if (!current || turn.createdAt > current.createdAt) newest.set(turn.sourceId, turn);
-  }
-  return [...newest.values()].map((turn) => turn.turnId).sort();
 }
 
 function compareObservedTurns(left: ObservedTurn, right: ObservedTurn): number {
