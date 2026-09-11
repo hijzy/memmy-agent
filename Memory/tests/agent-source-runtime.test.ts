@@ -213,7 +213,7 @@ describe("standalone Agent source executor", () => {
     await waitForScan(executor);
     expect(addMemory).toHaveBeenCalledTimes(2);
     expect(JSON.parse(readFileSync(statePath, "utf8"))).toMatchObject({
-      version: 2,
+      version: 3,
       sources: {
         "fixture-agent": {
           messageCount: 2,

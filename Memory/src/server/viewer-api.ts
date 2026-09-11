@@ -51,6 +51,11 @@ export const VIEWER_API_ROUTES = [
   "DELETE /api/v1/agent-sources/:id/plugin",
   "POST /api/v1/agent-sources/:id/skill",
   "DELETE /api/v1/agent-sources/:id/skill",
+  "POST /api/v1/agent-sources/manual",
+  "PATCH /api/v1/agent-sources/:id",
+  "DELETE /api/v1/agent-sources/:id",
+  "POST /api/v1/agent-sources/:id/import",
+  "POST /api/v1/agent-sources/:id/sync",
   "GET /api/v1/system/cli",
   "POST /api/v1/system/cli/install",
   "POST /api/v1/system/restart",
@@ -253,6 +258,27 @@ export async function routeViewerRequest(
         sourceConnection[2] as "plugin" | "skill",
         method
       )
+    };
+  }
+  if (method === "POST" && path === "/api/v1/agent-sources/manual") {
+    return { status: 201, body: await context.agentSources.addManualSource(body) };
+  }
+  const manualImport = path.match(/^\/api\/v1\/agent-sources\/([^/]+)\/(import|sync)$/);
+  if (method === "POST" && manualImport?.[1] && manualImport[2]) {
+    const sourceId = decodeURIComponent(manualImport[1]);
+    return {
+      body: manualImport[2] === "sync"
+        ? await context.agentSources.syncManualSource(sourceId)
+        : await context.agentSources.importManualSource(sourceId, body)
+    };
+  }
+  const manualSource = path.match(/^\/api\/v1\/agent-sources\/([^/]+)$/);
+  if ((method === "PATCH" || method === "DELETE") && manualSource?.[1]) {
+    const sourceId = decodeURIComponent(manualSource[1]);
+    return {
+      body: method === "PATCH"
+        ? await context.agentSources.updateManualSource(sourceId, body)
+        : await context.agentSources.removeManualSource(sourceId)
     };
   }
   if (method === "POST" && path === "/api/v1/models/test") {

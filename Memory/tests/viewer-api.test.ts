@@ -192,17 +192,7 @@ describe("local Viewer API", () => {
   it("reports the on-disk scan switches and re-arms automation on every config reload", async () => {
     const rescheduleAutomation = vi.fn();
     const fixture = await startFixture({
-      agentSourceExecutor: {
-        list: async () => ({ executorAvailable: true, sources: [] }),
-        startScan: async () => ({ accepted: true, jobId: "scan-1" }),
-        scanStatus: () => ({ running: false, jobId: null, sourceId: null, mode: null, progress: null, startedAt: null, completedAt: null, error: null }),
-        pauseScan: async () => ({ ok: true }),
-        cancelScan: async () => ({ ok: true }),
-        mutateConnection: async () => ({ ok: true }),
-        startAutomation: () => undefined,
-        rescheduleAutomation,
-        dispose: () => undefined
-      }
+      agentSourceExecutor: stubExecutor({ rescheduleAutomation })
     });
 
     // Another writer (Memmy Desktop, a text editor) changed the YAML without
@@ -242,27 +232,22 @@ describe("local Viewer API", () => {
   it("exposes standalone scan pause and cancel controls to the Viewer", async () => {
     const pauseScan = vi.fn(async () => ({ ok: true as const }));
     const cancelScan = vi.fn(async () => ({ ok: true as const }));
-    const agentSourceExecutor: AgentSourceExecutor = {
-      list: async () => ({ executorAvailable: true, sources: [] }),
-      startScan: async () => ({ accepted: true, jobId: "scan-1" }),
-      scanStatus: () => ({
-        running: true,
-        jobId: "scan-1",
-        sourceId: "codex",
-        mode: null,
-        progress: { sourceId: "codex", phase: "scan", current: 3, total: 10 },
-        startedAt: "2026-08-28T00:00:00.000Z",
-        completedAt: null,
-        error: null
-      }),
-      pauseScan,
-      cancelScan,
-      mutateConnection: async () => ({ ok: true }),
-      startAutomation: () => undefined,
-      rescheduleAutomation: () => undefined,
-      dispose: () => undefined
-    };
-    const fixture = await startFixture({ agentSourceExecutor });
+    const fixture = await startFixture({
+      agentSourceExecutor: stubExecutor({
+        scanStatus: () => ({
+          running: true,
+          jobId: "scan-1",
+          sourceId: "codex",
+          mode: null,
+          progress: { sourceId: "codex", phase: "scan", current: 3, total: 10 },
+          startedAt: "2026-08-28T00:00:00.000Z",
+          completedAt: null,
+          error: null
+        }),
+        pauseScan,
+        cancelScan
+      })
+    });
 
     const paused = await viewerFetch(fixture.baseUrl, "/api/v1/agent-sources/scan/stop", {
       method: "POST",
@@ -279,6 +264,64 @@ describe("local Viewer API", () => {
     expect(canceled.status).toBe(200);
     expect(await canceled.json()).toEqual({ ok: true });
     expect(cancelScan).toHaveBeenCalledOnce();
+  });
+
+  it("routes the manual Agent source lifecycle to the executor", async () => {
+    const calls: unknown[][] = [];
+    const record = <Result>(name: string, result: Result) => async (...args: unknown[]) => {
+      calls.push([name, ...args]);
+      return result;
+    };
+    const view = {
+      sourceId: "manual-1", displayName: "Internal Agent", dataPath: "/opt/internal",
+      builtin: false, available: true, status: "not_connected" as const,
+      messageCount: 0, lastScannedAt: null, syncBoundaryAt: null, syncReady: false
+    };
+    const importResult = {
+      sourceId: "manual-1", attempted: 2, written: 2, deduped: 0, failed: 0,
+      memoryIds: ["memory-1"], syncBoundaryAt: "2026-08-28T01:00:00.000Z", errors: []
+    };
+    const fixture = await startFixture({
+      agentSourceExecutor: stubExecutor({
+        addManualSource: record("add", view),
+        updateManualSource: record("update", view),
+        removeManualSource: record("remove", { ok: true as const }),
+        importManualSource: record("import", importResult),
+        syncManualSource: record("sync", importResult)
+      })
+    });
+
+    const added = await viewerFetch(fixture.baseUrl, "/api/v1/agent-sources/manual", {
+      method: "POST",
+      body: JSON.stringify({ displayName: "Internal Agent" })
+    });
+    expect(added.status).toBe(201);
+    expect(await added.json()).toEqual(view);
+
+    for (const [path, method, body] of [
+      ["/api/v1/agent-sources/manual-1", "PATCH", JSON.stringify({ dataPath: "/opt/internal" })],
+      ["/api/v1/agent-sources/manual-1/import", "POST", JSON.stringify({ mode: "initial_subset", messages: [] })],
+      ["/api/v1/agent-sources/manual-1/sync", "POST", "{}"],
+      ["/api/v1/agent-sources/manual-1", "DELETE", "{}"]
+    ] as const) {
+      const response = await viewerFetch(fixture.baseUrl, path, { method, body });
+      expect([path, method, response.status]).toEqual([path, method, 200]);
+    }
+
+    expect(calls).toEqual([
+      ["add", { displayName: "Internal Agent" }],
+      ["update", "manual-1", { dataPath: "/opt/internal" }],
+      ["import", "manual-1", { mode: "initial_subset", messages: [] }],
+      ["sync", "manual-1"],
+      ["remove", "manual-1"]
+    ]);
+
+    // The scan sub-routes must keep winning over the manual :id patterns.
+    const scan = await viewerFetch(fixture.baseUrl, "/api/v1/agent-sources/scan", {
+      method: "POST",
+      body: JSON.stringify({ sourceId: "all" })
+    });
+    expect(scan.status).toBe(202);
   });
 
   it("reports and installs the memmy-memory CLI through the local Viewer boundary", async () => {
@@ -561,6 +604,32 @@ describe("local Viewer API", () => {
     });
   });
 });
+
+function stubExecutor(overrides: Partial<AgentSourceExecutor> = {}): AgentSourceExecutor {
+  const unexpected = (name: string) => async () => {
+    throw new Error(`unexpected ${name} call`);
+  };
+  return {
+    list: async () => ({ executorAvailable: true, sources: [] }),
+    startScan: async () => ({ accepted: true, jobId: "scan-1" }),
+    scanStatus: () => ({
+      running: false, jobId: null, sourceId: null, mode: null,
+      progress: null, startedAt: null, completedAt: null, error: null
+    }),
+    pauseScan: async () => ({ ok: true }),
+    cancelScan: async () => ({ ok: true }),
+    mutateConnection: async () => ({ ok: true }),
+    addManualSource: unexpected("addManualSource"),
+    updateManualSource: unexpected("updateManualSource"),
+    removeManualSource: unexpected("removeManualSource"),
+    importManualSource: unexpected("importManualSource"),
+    syncManualSource: unexpected("syncManualSource"),
+    startAutomation: () => undefined,
+    rescheduleAutomation: () => undefined,
+    dispose: () => undefined,
+    ...overrides
+  };
+}
 
 async function startFixture(options: {
   llm?: LlmClient;

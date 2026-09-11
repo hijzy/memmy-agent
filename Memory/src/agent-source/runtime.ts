@@ -38,9 +38,25 @@ import {
   stableTurnIdentity,
   legacyTurnId,
   legacyTurnRequestId,
+  type ImportedTurn,
   type ScanStore
 } from "@memmy/agent-source-core";
 import { openMemoryAgentSourceScanStore, type MemoryAgentSourceScanStore } from "./scan-store.js";
+import {
+  extractManagedAgentHistory,
+  selectIncrementalManagedMessages
+} from "./managed-history.js";
+import {
+  AddManualSourceInputSchema,
+  MANUAL_SOURCE_DISCOVERY_PENDING_DATA_PATH,
+  ManagedSyncRecipeSchema,
+  ManualSourceImportInputSchema,
+  ManualSourceUpdateInputSchema,
+  parseOrInvalidArgument,
+  type ManagedSyncRecipe,
+  type ManualSourceImportInput,
+  type ManualSourceImportResult
+} from "./manual-sources.js";
 import { createWorkbuddySourceAdapter } from "./adapters/workbuddy/index.js";
 import { createClaudeCodeSkillTarget } from "./integration/claude-code/index.js";
 import { createCodexSkillTarget } from "./integration/codex/index.js";
@@ -75,6 +91,10 @@ export interface AgentSourceView {
   status: AgentConnectionStatus;
   messageCount: number;
   lastScannedAt: string | null;
+  /** The permanent first-sync boundary. Only manual sources record one today. */
+  syncBoundaryAt?: string | null;
+  /** Whether format discovery has produced a usable sync recipe. */
+  syncReady?: boolean;
 }
 
 export interface AgentSourceScanState {
@@ -96,6 +116,14 @@ export interface AgentSourceExecutor {
   cancelScan(): Promise<{ ok: true }>;
   scanResults?(jobId: string, cursor?: string, limit?: number): Promise<{ items: Array<{ sourceId: string; conversationId: string; memoryId?: string; error?: string }>; nextCursor: string | null }>;
   mutateConnection(sourceId: string, kind: "plugin" | "skill", method: "POST" | "DELETE"): Promise<unknown>;
+  /** Registers a user-added Agent whose history format is not yet known. */
+  addManualSource(input: unknown): Promise<AgentSourceView>;
+  updateManualSource(sourceId: string, input: unknown): Promise<AgentSourceView>;
+  removeManualSource(sourceId: string): Promise<{ ok: true }>;
+  /** Imports messages a caller already extracted, in pages. */
+  importManualSource(sourceId: string, input: unknown): Promise<ManualSourceImportResult>;
+  /** Re-reads the recipe and imports whatever appeared after the boundary. */
+  syncManualSource(sourceId: string): Promise<ManualSourceImportResult>;
   startAutomation(): void;
   /** Re-arms the automation timer after `memmyMemory.agentAccess` changed on disk. */
   rescheduleAutomation(): void;
@@ -110,9 +138,22 @@ interface PersistedSourceState {
   contentHash?: string;
 }
 
+/**
+ * A manual source has no adapter, so the state file is the only record that it
+ * exists at all, where its history lives and how to read it.
+ */
+interface PersistedManualSource {
+  displayName: string;
+  dataPath: string;
+  syncRecipe: ManagedSyncRecipe | null;
+  baselineAt: string | null;
+  createdAt: string;
+}
+
 interface PersistedState {
-  version: 2;
+  version: 3;
   sources: Record<string, PersistedSourceState>;
+  manual: Record<string, PersistedManualSource>;
 }
 
 export interface CreateAgentSourceExecutorOptions {
@@ -177,7 +218,170 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         lastScannedAt: stored?.lastScannedAt ?? null
       };
     }));
-    return { executorAvailable: true, sources };
+    return {
+      executorAvailable: true,
+      sources: [...sources, ...Object.keys(state.manual).map((sourceId) => manualView(state, sourceId))]
+    };
+  }
+
+  function manualView(state: PersistedState, sourceId: string): AgentSourceView {
+    const manual = requireManualSource(state, sourceId);
+    const stored = state.sources[sourceId];
+    return {
+      sourceId,
+      displayName: manual.displayName,
+      dataPath: manual.dataPath,
+      builtin: false,
+      // The user vouched for a manual source by adding it; there is no
+      // adapter to detect, so nothing can withdraw that.
+      available: true,
+      status: stored?.status ?? "not_connected",
+      messageCount: stored?.messageCount ?? 0,
+      lastScannedAt: stored?.lastScannedAt ?? null,
+      syncBoundaryAt: manual.baselineAt,
+      syncReady: Boolean(manual.syncRecipe)
+    };
+  }
+
+  function requireManualSource(state: PersistedState, sourceId: string): PersistedManualSource {
+    const manual = state.manual[sourceId];
+    if (!manual) throw new MemoryServiceError("not_found", `Unknown manual Agent source: ${sourceId}`);
+    return manual;
+  }
+
+  async function addManualSource(input: unknown): Promise<AgentSourceView> {
+    const { displayName } = parseOrInvalidArgument(AddManualSourceInputSchema, input);
+    const state = await readState();
+    const sourceId = randomUUID();
+    state.manual[sourceId] = {
+      displayName,
+      dataPath: MANUAL_SOURCE_DISCOVERY_PENDING_DATA_PATH,
+      syncRecipe: null,
+      baselineAt: null,
+      createdAt: new Date().toISOString()
+    };
+    state.sources[sourceId] = emptySourceState();
+    await persist(state);
+    logger.info("manual_source.added", { sourceId, displayName });
+    return manualView(state, sourceId);
+  }
+
+  async function updateManualSource(sourceId: string, input: unknown): Promise<AgentSourceView> {
+    const patch = parseOrInvalidArgument(ManualSourceUpdateInputSchema, input);
+    const state = await readState();
+    const manual = requireManualSource(state, sourceId);
+    if (patch.syncRecipe) assertRecipeFindsTurns(sourceId, patch.syncRecipe);
+    state.manual[sourceId] = {
+      ...manual,
+      ...(patch.dataPath ? { dataPath: patch.dataPath } : {}),
+      ...(patch.syncRecipe ? { syncRecipe: patch.syncRecipe } : {})
+    };
+    if (patch.skillInstalled !== undefined) {
+      state.sources[sourceId] = {
+        ...(state.sources[sourceId] ?? emptySourceState()),
+        status: patch.skillInstalled ? "skill_installed" : "not_connected"
+      };
+    }
+    await persist(state);
+    return manualView(state, sourceId);
+  }
+
+  async function removeManualSource(sourceId: string): Promise<{ ok: true }> {
+    const state = await readState();
+    requireManualSource(state, sourceId);
+    delete state.manual[sourceId];
+    delete state.sources[sourceId];
+    await persist(state);
+    logger.info("manual_source.removed", { sourceId });
+    return { ok: true };
+  }
+
+  async function importManualSource(sourceId: string, input: unknown): Promise<ManualSourceImportResult> {
+    return ingestManualMessages(sourceId, parseOrInvalidArgument(ManualSourceImportInputSchema, input));
+  }
+
+  async function syncManualSource(sourceId: string): Promise<ManualSourceImportResult> {
+    const state = await readState();
+    const manual = requireManualSource(state, sourceId);
+    if (!manual.syncRecipe) {
+      throw new MemoryServiceError("conflict", "Manual Agent source has not completed first-time format discovery");
+    }
+    if (!manual.baselineAt) {
+      throw new MemoryServiceError("conflict", "Manual Agent source has no recorded initial sync boundary");
+    }
+    const messages = selectIncrementalManagedMessages(
+      readManagedHistory(sourceId, manual.syncRecipe),
+      manual.baselineAt
+    );
+    const result = await ingestManualMessages(sourceId, {
+      mode: "incremental",
+      messages,
+      syncBoundaryAt: manual.baselineAt,
+      latestSeenAt: latestCreatedAt(messages),
+      final: true
+    });
+    if (result.errors.length > 0) {
+      throw new MemoryServiceError(
+        "internal",
+        `Manual Agent sync failed: ${result.errors.map((error) => error.reason).join("; ")}`
+      );
+    }
+    return result;
+  }
+
+  async function ingestManualMessages(
+    sourceId: string,
+    input: ManualImportRequest
+  ): Promise<ManualSourceImportResult> {
+    const state = await readState();
+    const manual = requireManualSource(state, sourceId);
+    if (input.dataPath) {
+      state.manual[sourceId] = { ...manual, dataPath: input.dataPath };
+      await persist(state);
+    }
+    const messages = manualMessagesForIngestion(sourceId, input.messages);
+    const ingested = await ingestManualTurns(
+      options.service,
+      manual.displayName,
+      messages,
+      options.scheduleWorker
+    );
+    const stored = state.sources[sourceId] ?? emptySourceState();
+    const earliest = earliestCreatedAt(messages);
+    const syncBoundaryAt = input.mode === "initial_subset"
+      ? input.syncBoundaryAt ?? manual.baselineAt ?? earliest
+      : manual.baselineAt ?? input.syncBoundaryAt ?? earliest;
+    if (input.final && ingested.errors.length === 0) {
+      const scannedAt = new Date().toISOString();
+      state.manual[sourceId] = { ...state.manual[sourceId]!, baselineAt: syncBoundaryAt };
+      state.sources[sourceId] = {
+        ...stored,
+        messageCount: input.mode === "incremental"
+          ? stored.messageCount + ingested.written
+          : ingested.written,
+        lastScannedAt: scannedAt,
+        latestSeenAt: maxIso(
+          maxIso(stored.latestSeenAt, input.latestSeenAt ?? null),
+          latestCreatedAt(messages)
+        )
+      };
+      await persist(state);
+    }
+    return { sourceId, syncBoundaryAt, ...ingested };
+  }
+
+  /** A recipe that finds no complete turn is a failed discovery, not a setting. */
+  function assertRecipeFindsTurns(sourceId: string, recipe: ManagedSyncRecipe): void {
+    const messages = selectIncrementalManagedMessages(
+      readManagedHistory(sourceId, recipe),
+      new Date(0).toISOString()
+    );
+    if (messages.length === 0) {
+      throw new MemoryServiceError(
+        "invalid_argument",
+        "Manual Agent sync recipe found no complete user/assistant turns"
+      );
+    }
   }
 
   async function startScan(input: unknown): Promise<{ accepted: true; jobId: string }> {
@@ -548,6 +752,11 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     cancelScan,
     scanResults,
     mutateConnection,
+    addManualSource,
+    updateManualSource,
+    removeManualSource,
+    importManualSource,
+    syncManualSource,
     startAutomation() {
       if (automationStarted || disposed) return;
       automationStarted = true;
@@ -573,6 +782,160 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       await Promise.all(activeScans);
     }
   };
+}
+
+interface ManualImportMessage {
+  messageId: string;
+  conversationId: string;
+  role: ConversationMessage["role"];
+  content: string;
+  createdAt: string;
+  workspacePath?: string | null;
+  gitRoot?: string | null;
+  rawMeta?: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * The internal form of an import. The HTTP schema caps a page at 2000 messages
+ * because the caller pages; a recipe-driven sync builds its own request and is
+ * bounded by the recipe limits instead.
+ */
+interface ManualImportRequest {
+  mode: ManualSourceImportInput["mode"];
+  messages: readonly ManualImportMessage[];
+  dataPath?: string;
+  syncBoundaryAt?: string | null;
+  latestSeenAt?: string | null;
+  final: boolean;
+}
+
+/** Reports a recipe that cannot be read as a bad recipe, not a service fault. */
+function readManagedHistory(sourceId: string, recipe: ManagedSyncRecipe): ConversationMessage[] {
+  try {
+    return extractManagedAgentHistory(sourceId, recipe);
+  } catch (error) {
+    if (error instanceof MemoryServiceError) throw error;
+    throw new MemoryServiceError(
+      "invalid_argument",
+      `Manual Agent history could not be read: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
+
+function manualMessagesForIngestion(
+  sourceId: string,
+  messages: readonly ManualImportMessage[]
+): ConversationMessage[] {
+  return messages
+    .map((message, index) => ({
+      index,
+      message: {
+        messageId: message.messageId,
+        sourceId,
+        conversationId: message.conversationId,
+        role: message.role,
+        content: message.content,
+        createdAt: message.createdAt,
+        workspacePath: message.workspacePath ?? null,
+        gitRoot: message.gitRoot ?? null,
+        rawMeta: message.rawMeta ?? {}
+      } satisfies ConversationMessage
+    }))
+    .sort((left, right) =>
+      left.message.conversationId.localeCompare(right.message.conversationId) ||
+      Date.parse(left.message.createdAt) - Date.parse(right.message.createdAt) ||
+      left.index - right.index
+    )
+    .map((entry) => entry.message);
+}
+
+/**
+ * Writes one memory per complete turn, with the same turn identity the adapter
+ * path uses, so a turn imported here is the same memory either way.
+ */
+async function ingestManualTurns(
+  service: MemoryService,
+  memorySource: string,
+  messages: readonly ConversationMessage[],
+  scheduleWorker?: () => void
+): Promise<Omit<ManualSourceImportResult, "sourceId" | "syncBoundaryAt">> {
+  const memoryIds: string[] = [];
+  const errors: ManualSourceImportResult["errors"] = [];
+  let written = 0;
+  let deduped = 0;
+  let failed = 0;
+  for (const turn of manualTurns(messages)) {
+    if (!isCompleteTurn(turn.messages)) {
+      deduped += turn.messages.length;
+      continue;
+    }
+    try {
+      const added = service.addMemory({
+        requestId: legacyTurnRequestId(turn),
+        adapterId: `agent-source:${turn.sourceId}`,
+        content: renderTurnClipped(turn.messages),
+        layer: "L1",
+        title: titleForTurn(memorySource, turn.messages),
+        tags: ["agent-source", memorySource],
+        source: memorySource,
+        turnId: legacyTurnId(turn),
+        createdAt: turn.messages[0]!.createdAt,
+        deferProcessing: true
+      });
+      if (added.duplicate) {
+        deduped += turn.messages.length;
+      } else {
+        written += turn.messages.length;
+        memoryIds.push(added.id);
+      }
+    } catch (error) {
+      failed += turn.messages.length;
+      errors.push({
+        conversationId: turn.conversationId,
+        reason: error instanceof Error ? error.message : "manual Agent import failed"
+      });
+    }
+  }
+  if (memoryIds.length > 0) {
+    service.enqueuePendingImportSummaries(INITIAL_SCAN_MESSAGE_LIMIT, memoryIds);
+    scheduleWorker?.();
+  }
+  return { attempted: messages.length, written, deduped, failed, memoryIds, errors };
+}
+
+function* manualTurns(messages: readonly ConversationMessage[]): Generator<ImportedTurn> {
+  let current: ConversationMessage[] = [];
+  let conversationId = "";
+  let turnIndex = 0;
+  for (const message of messages) {
+    if (message.conversationId !== conversationId) {
+      if (current.length > 0) yield { sourceId: current[0]!.sourceId, conversationId, turnIndex, messages: current };
+      current = [];
+      conversationId = message.conversationId;
+      turnIndex = 0;
+    } else if (message.role === "user" && current.length > 0) {
+      yield { sourceId: current[0]!.sourceId, conversationId, turnIndex, messages: current };
+      turnIndex += 1;
+      current = [];
+    }
+    current.push(message);
+  }
+  if (current.length > 0) yield { sourceId: current[0]!.sourceId, conversationId, turnIndex, messages: current };
+}
+
+function earliestCreatedAt(messages: readonly { createdAt: string }[]): string | null {
+  return messages.reduce<string | null>((earliest, message) =>
+    !earliest || Date.parse(message.createdAt) < Date.parse(earliest) ? message.createdAt : earliest, null);
+}
+
+function latestCreatedAt(messages: readonly { createdAt: string }[]): string | null {
+  return messages.reduce<string | null>((latest, message) => maxIso(latest, message.createdAt), null);
+}
+
+function maxIso(left: string | null, right: string | null): string | null {
+  if (!left) return right;
+  if (!right) return left;
+  return Date.parse(right) > Date.parse(left) ? right : left;
 }
 
 function findReusableScanJob(directory: string, sourceId: string, mode?: string): string | null {
@@ -1114,15 +1477,39 @@ async function loadState(path: string): Promise<PersistedState> {
       } satisfies PersistedSourceState];
     }));
     const state: PersistedState = {
-      version: 2,
-      sources
+      version: 3,
+      sources,
+      manual: readManualSources(value.manual)
     };
-    if (value.version !== 2 || hasLegacyIds) await writeState(path, state);
+    if (value.version !== 3 || hasLegacyIds) await writeState(path, state);
     return state;
   } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") return { version: 2, sources: {} };
+    if (isNodeError(error) && error.code === "ENOENT") return { version: 3, sources: {}, manual: {} };
     throw error;
   }
+}
+
+/**
+ * A recipe that no longer parses costs that one source its sync, which the
+ * viewer shows as "not ready". Refusing to load the whole file would cost
+ * every source instead.
+ */
+function readManualSources(value: unknown): Record<string, PersistedManualSource> {
+  return Object.fromEntries(Object.entries(record(value)).flatMap(([sourceId, raw]) => {
+    const source = record(raw);
+    const displayName = typeof source.displayName === "string" ? source.displayName.trim() : "";
+    if (!displayName) return [];
+    const recipe = ManagedSyncRecipeSchema.safeParse(source.syncRecipe);
+    return [[sourceId, {
+      displayName,
+      dataPath: typeof source.dataPath === "string" && source.dataPath.trim()
+        ? source.dataPath
+        : MANUAL_SOURCE_DISCOVERY_PENDING_DATA_PATH,
+      syncRecipe: recipe.success ? recipe.data : null,
+      baselineAt: typeof source.baselineAt === "string" ? source.baselineAt : null,
+      createdAt: typeof source.createdAt === "string" ? source.createdAt : new Date(0).toISOString()
+    } satisfies PersistedManualSource]];
+  }));
 }
 
 /** Streams legacy state while replacing the unbounded ID arrays with empty arrays. */
