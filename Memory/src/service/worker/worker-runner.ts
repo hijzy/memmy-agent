@@ -170,6 +170,7 @@ export class WorkerRunner {
     }
 
     const at = this.deps.nowIso();
+    this.deps.repos.runtime.pruneIdempotency(at);
     const interruptedJobs = this.deps.repos.runtime.requeueLeasedJobsAfterRestart(at);
     const failedJobs = this.deps.repos.runtime.requeueFailedJobs(limit, at);
     for (const { before, after } of [...interruptedJobs, ...failedJobs]) {

@@ -91,6 +91,10 @@ const CLEAR_MEMORY_TABLES = [
 ] as const;
 type BundleTableName = typeof BUNDLE_TABLES[number];
 const LOG_TABLE_RETENTION_LIMIT = 10_000;
+// Idempotency records are a replay cache for retried client requests, not a
+// permanent ledger. Keeping them forever turns any one-off body drift into a
+// failure that never heals, so entries age out on their own.
+const IDEMPOTENCY_TTL_MS = 48 * 60 * 60 * 1000;
 const LOG_TABLE_RETENTION_ORDER = {
   api_logs: "called_at DESC, id DESC",
   memory_change_log: "seq DESC",
@@ -2643,25 +2647,41 @@ export class RuntimeRepository {
     this.db
       .prepare(
         `INSERT INTO idempotency_keys (key, request_hash, response_json, created_at, expires_at)
-         VALUES (?, ?, ?, ?, NULL)
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET
            request_hash = excluded.request_hash,
-           response_json = excluded.response_json`
+           response_json = excluded.response_json,
+           created_at = excluded.created_at,
+           expires_at = excluded.expires_at`
       )
-      .run(key, requestHash, toJson(response), createdAt);
+      .run(key, requestHash, toJson(response), createdAt, idempotencyExpiresAt(createdAt));
   }
 
-  getIdempotency(key: string): { requestHash: string; response: unknown } | undefined {
+  getIdempotency(key: string, now = nowIso()): { requestHash: string; response: unknown } | undefined {
     const row = this.db
-      .prepare(`SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?`)
-      .get(key) as { request_hash: string; response_json: string } | undefined;
-    if (!row) {
+      .prepare(
+        `SELECT request_hash, response_json, created_at, expires_at
+         FROM idempotency_keys WHERE key = ?`
+      )
+      .get(key) as SqlIdempotencyRow | undefined;
+    if (!row || idempotencyExpired(row, now)) {
       return undefined;
     }
     return {
       requestHash: row.request_hash,
       response: parseJson(row.response_json, undefined)
     };
+  }
+
+  pruneIdempotency(now = nowIso()): number {
+    const result = this.db
+      .prepare(
+        `DELETE FROM idempotency_keys
+         WHERE (expires_at IS NOT NULL AND expires_at <= ?)
+            OR (expires_at IS NULL AND created_at <= ?)`
+      )
+      .run(now, new Date(Date.parse(now) - IDEMPOTENCY_TTL_MS).toISOString());
+    return result.changes;
   }
 
   enqueueJob(job: EvolutionJobRecord): EvolutionJobRecord {
@@ -6763,6 +6783,22 @@ interface SqlChangeRow {
   after_json: string | null;
   source: string;
   created_at: string;
+}
+
+interface SqlIdempotencyRow {
+  request_hash: string;
+  response_json: string;
+  created_at: string;
+  expires_at: string | null;
+}
+
+function idempotencyExpiresAt(createdAt: string): string {
+  const at = Date.parse(createdAt);
+  return new Date((Number.isFinite(at) ? at : Date.now()) + IDEMPOTENCY_TTL_MS).toISOString();
+}
+
+function idempotencyExpired(row: SqlIdempotencyRow, now: string): boolean {
+  return Date.parse(row.expires_at ?? idempotencyExpiresAt(row.created_at)) <= Date.parse(now);
 }
 
 function versionFromChangePayload(payload: unknown): number | null {

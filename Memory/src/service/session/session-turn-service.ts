@@ -1229,10 +1229,9 @@ export class SessionTurnService {
 
     if (idempotencyKey) {
       const existing = this.deps.repos.runtime.getIdempotency(idempotencyKey);
-      if (existing) {
-        if (existing.requestHash !== requestHash) {
-          throw new MemoryServiceError("conflict", "idempotency key reused with different request body");
-        }
+      // A reused key carrying a different body supersedes the cached replay
+      // rather than failing the turn; see MemoryService.idempotent.
+      if (existing?.requestHash === requestHash) {
         return {
           ...(existing.response as CompleteTurnResponse),
           scheduledEvolution: false,

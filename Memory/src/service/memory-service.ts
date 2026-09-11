@@ -827,11 +827,16 @@ export class MemoryService {
     }
     const requestHash = stableHash({ operation, fingerprint });
     const existing = this.repos.runtime.getIdempotency(idempotencyKey);
-    if (existing) {
-      if (existing.requestHash !== requestHash) {
-        throw new MemoryServiceError("conflict", "idempotency key reused with different request body");
-      }
+    if (existing?.requestHash === requestHash) {
       return withDuplicateFlag(existing.response) as T;
+    }
+    // Callers derive requestId from a narrower input than the body they send
+    // (an agent-source scan keys a skill on its content hash but still ships
+    // the file mtime), so a reused key with a changed body is a supersede, not
+    // a client error. Writes behind this guard upsert, and rejecting here
+    // instead left the stale record wedged forever.
+    if (existing) {
+      serviceLogger.info("idempotency.superseded", { operation, adapterId: request.adapterId });
     }
     const response = await scopedRun();
     this.repos.runtime.saveIdempotency(idempotencyKey, requestHash, response);
