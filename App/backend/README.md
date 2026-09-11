@@ -77,7 +77,7 @@ The local API is grouped into these route families:
 
 - Application bootstrap, settings, onboarding, account, quota, and local data
 - Agent-source discovery, scanning, manual sources, auto-sync recipes, skills,
-  hooks, and plugins
+  hooks, and plugins, all forwarded to the memory service that owns them
 - Channels and external integrations
 - BYOK token usage and speech transcription
 - Agent Runtime memory, session, turn, and panel routes
@@ -140,5 +140,6 @@ Agent roots can be overridden with `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
 
 - `app.connected`: emitted when the SSE stream opens.
 - `app.heartbeat`: periodic connection heartbeat.
-- `agent_source.scan_progress`: source-scan progress.
-- `agent_source.scan_completed`: source-scan completion summary.
+- `agent_source.scan_progress`: source-scan progress, relayed from the memory
+  service's scan status and tagged with the `origin` that asked for the run.
+- `agent_source.scan_completed`: source-scan completion summary, same `origin`.

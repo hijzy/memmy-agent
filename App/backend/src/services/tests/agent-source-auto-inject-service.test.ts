@@ -90,7 +90,7 @@ describe("agent source auto inject service", () => {
     const service = createAgentSourceAutoInjectService({
       agentSources: {
         ...createAgentSources(calls),
-        async installPlugin(sourceId) {
+        async connect(sourceId: string) {
           calls.push(`plugin:${sourceId}`);
           await installGate;
         }
@@ -125,11 +125,11 @@ function createAgentSources(calls: string[]) {
         source("custom", "not_connected", false)
       ];
     },
-    async installSkill(sourceId: string) {
-      calls.push(`skill:${sourceId}`);
+    async connect(sourceId: string, kind: "plugin" | "skill", installType?: string) {
+      calls.push(kind === "skill" ? `skill:${sourceId}` : `plugin:${sourceId}:${installType ?? "manual"}`);
     },
-    async installPlugin(sourceId: string, action?: { installType?: string }) {
-      calls.push(`plugin:${sourceId}:${action?.installType ?? "manual"}`);
+    async disconnect(sourceId: string, kind: "plugin" | "skill") {
+      calls.push(`disconnect:${kind}:${sourceId}`);
     }
   };
 }

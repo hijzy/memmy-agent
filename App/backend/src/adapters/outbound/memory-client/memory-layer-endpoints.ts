@@ -24,7 +24,20 @@ export const MEMORY_LAYER_PATHS = Object.freeze({
   panelAnalysis: "/api/v1/panel/analysis",
   panelItems: "/api/v1/panel/items",
   panelTasks: "/api/v1/panel/tasks",
-  deletePanelTask: "/api/v1/panel/tasks/:id"
+  deletePanelTask: "/api/v1/panel/tasks/:id",
+  agentSources: "/api/v1/agent-sources",
+  agentSourceScan: "/api/v1/agent-sources/scan",
+  agentSourceScanStatus: "/api/v1/agent-sources/scan/status",
+  agentSourceScanResults: "/api/v1/agent-sources/scan/jobs/:jobId/results",
+  agentSourceScanStop: "/api/v1/agent-sources/scan/stop",
+  agentSourceScanCancel: "/api/v1/agent-sources/scan/cancel",
+  agentSourcePluginConflicts: "/api/v1/agent-sources/plugin-conflicts",
+  agentSourceManual: "/api/v1/agent-sources/manual",
+  agentSourcePlugin: "/api/v1/agent-sources/:id/plugin",
+  agentSourceSkill: "/api/v1/agent-sources/:id/skill",
+  agentSource: "/api/v1/agent-sources/:id",
+  agentSourceImport: "/api/v1/agent-sources/:id/import",
+  agentSourceSync: "/api/v1/agent-sources/:id/sync"
 } as const);
 
 /** Builds build memory layer url. */

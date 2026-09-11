@@ -113,7 +113,9 @@ export interface ApiErrorBody {
       | "not_found"
       | "conflict"
       | "rate_limited"
-      | "internal";
+      | "internal"
+      /** An Agent is not installed, or its history directory is gone. */
+      | "agent_source_unavailable";
     message: string;
     requestId?: string;
   };

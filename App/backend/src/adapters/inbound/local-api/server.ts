@@ -37,9 +37,6 @@ export interface CreateLocalApiServerOptions {
   composioMcpToken: string;
   heartbeatIntervalMs?: number;
   allowedOrigins?: readonly string[];
-  scanProcess?: {
-    databasePath: string;
-  };
 }
 
 interface EventsQuerystring {
@@ -83,12 +80,11 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   });
 
   registerAgentSourceRoutes(app, {
-    agentSources: options.services.agentSources,
+    memoryClient: options.services.memoryClient,
+    agentSourceConnections: options.services.agentSourceConnections,
     agentSourceAutoInject: options.services.agentSourceAutoInject,
-    progressBus: options.services.progressBus,
-    permissionManager: options.permissionManager,
-    authenticateRuntimeToken,
-    scanProcess: options.scanProcess
+    scanRelay: options.services.agentSourceScanRelay,
+    authenticateRuntimeToken
   });
   registerAppConfigRoutes(app, {
     appConfig: options.services.appConfig,

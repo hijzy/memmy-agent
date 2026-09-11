@@ -11,7 +11,7 @@ import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import { createLocalBackend, readMemoryLayerConfig, type LocalBackend } from "../index.js";
 import { createAppStateStore } from "../infrastructure/app-state-store/index.js";
 import { createMockCloudClient } from "./support/mock-cloud-client.js";
-import { createMockMemoryClient } from "./support/mock-memory-client.js";
+import { createMockMemoryClient, mockAgentSourceView } from "./support/mock-memory-client.js";
 
 let tempDir: string | undefined;
 let backend: LocalBackend | undefined;
@@ -1196,8 +1196,16 @@ describe("local api", () => {
     }
   });
 
-  it("exposes the ten built-in agent sources in registry order", async () => {
-    backend = await createTempBackend();
+  /**
+   * The Agent registry moved into the memory service, which is now the only
+   * thing that knows which Agents exist; Desktop hands its answer through.
+   */
+  it("exposes the Agent sources the memory service detected", async () => {
+    backend = await createTempBackend({
+      memoryClient: createMockMemoryClient({
+        agentSources: [mockAgentSourceView("cursor", "Cursor"), mockAgentSourceView("codex", "Codex")]
+      })
+    });
 
     const response = await fetch(`${backend.runtimeConfig.baseUrl}/api/agent-sources`, {
       method: "GET",
@@ -1209,15 +1217,7 @@ describe("local api", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual([
       expect.objectContaining({ sourceId: "cursor", displayName: "Cursor" }),
-      expect.objectContaining({ sourceId: "claude_code", displayName: "Claude Code" }),
-      expect.objectContaining({ sourceId: "codex", displayName: "Codex" }),
-      expect.objectContaining({ sourceId: "opencode", displayName: "Opencode" }),
-      expect.objectContaining({ sourceId: "openclaw", displayName: "OpenClaw" }),
-      expect.objectContaining({ sourceId: "hermes", displayName: "Hermes" }),
-      expect.objectContaining({ sourceId: "deepseek_harness", displayName: "DeepSeek Harness" }),
-      expect.objectContaining({ sourceId: "workbuddy", displayName: "WorkBuddy" }),
-      expect.objectContaining({ sourceId: "pi", displayName: "Pi" }),
-      expect.objectContaining({ sourceId: "qwenwork", displayName: "QwenWork" })
+      expect.objectContaining({ sourceId: "codex", displayName: "Codex" })
     ]);
   });
 });

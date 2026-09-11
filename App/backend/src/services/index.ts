@@ -21,6 +21,8 @@ import {
 } from "../analytics/agent-source-analytics.js";
 import { createMemoryDesktopAddAnalytics } from "../analytics/memory-add-analytics.js";
 import { createToolConnectionAnalytics } from "../analytics/tool-connection-analytics.js";
+import { createAgentSourceConnectionService, type AgentSourceConnectionService } from "./agent-source-connection-service.js";
+import { createAgentSourceScanRelay, type AgentSourceScanRelay } from "./agent-source-scan-relay.js";
 import { createAgentSourceService, type AgentSourceService } from "./agent-source-service.js";
 import { createAgentSourceAutoInjectService, type AgentSourceAutoInjectService } from "./agent-source-auto-inject-service.js";
 import { createBuiltinAgentSourceRegistry } from "./builtin-agent-source-registry.js";
@@ -71,6 +73,9 @@ export interface BackendServices {
   channels: ChannelService;
   localData: LocalDataService;
   agentSources: AgentSourceService;
+  agentSourceConnections: AgentSourceConnectionService;
+  /** Relays the memory service's scan progress onto the local event stream. */
+  agentSourceScanRelay: AgentSourceScanRelay;
   agentSourceAutoInject: AgentSourceAutoInjectService;
   onboardingInsight: OnboardingInsightService;
   progressBus: ProgressBus;
@@ -168,6 +173,14 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     }),
     scanStoreDirectory: join(dirname(options.appStateStore.databasePath), "agent-source-scans"),
   });
+  const agentSourceConnections = createAgentSourceConnectionService({
+    memoryClient: options.memoryClient,
+    agentSourceAnalytics: createAgentSourceLifecycleAnalytics({
+      getUserId: resolveAnalyticsUserId,
+      getUserMode: resolveAnalyticsUserMode,
+    }),
+    getScanPermission: () => options.permissionManager.getScanPermission(),
+  });
   const toolConnectionAnalytics = createToolConnectionAnalytics({
     getUserId: resolveAnalyticsUserId,
     getUserMode: resolveAnalyticsUserMode,
@@ -211,8 +224,18 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       memoryClient: options.memoryClient
     }),
     agentSources,
+    agentSourceConnections,
+    agentSourceScanRelay: createAgentSourceScanRelay({
+      memoryClient: options.memoryClient,
+      progressBus,
+      logger: {
+        warn(message, meta) {
+          console.warn(`[agent-source] ${message}: ${JSON.stringify(meta)}`);
+        }
+      }
+    }),
     agentSourceAutoInject: createAgentSourceAutoInjectService({
-      agentSources,
+      agentSources: agentSourceConnections,
       permissionManager: options.permissionManager,
       getScanPreferences: () => options.scanPreferencesStore?.getScanPreferences()
         ?? options.appStateStore.repositories.bootstrap.getScanPreferences()

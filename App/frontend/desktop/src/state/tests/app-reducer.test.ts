@@ -203,6 +203,45 @@ describe("app reducer", () => {
     expect(staleProgressState).toBe(failedButFinishedState);
   });
 
+  /**
+   * The memory service scans on its own schedule and for the Viewer too. Those
+   * runs must not make a progress card appear in front of a user who is not
+   * scanning anything.
+   */
+  it("leaves the progress card alone for a scan this app did not start", () => {
+    const scanningState = appReducer(
+      appReducer(createInitialAppState(), appActions.agentSourceScanStarted("cursor")),
+      appActions.agentSourceScanProgressReceived({
+        jobId: "job-app",
+        sourceId: "cursor",
+        phase: "add",
+        current: 1,
+        total: 5,
+        origin: "app"
+      })
+    );
+
+    const backgroundProgressState = appReducer(scanningState, appActions.agentSourceScanProgressReceived({
+      jobId: "job-automation",
+      sourceId: "codex",
+      phase: "scan",
+      current: 3,
+      total: 40,
+      origin: "automation"
+    }));
+    const backgroundCompletedState = appReducer(backgroundProgressState, appActions.agentSourceScanCompleted({
+      jobId: "job-automation",
+      sourceId: "codex",
+      succeeded: true,
+      origin: "automation"
+    }));
+
+    expect(backgroundProgressState).toBe(scanningState);
+    expect(backgroundCompletedState).toBe(scanningState);
+    expect(backgroundCompletedState.agentSources.scanProgress).toMatchObject({ jobId: "job-app" });
+    expect(backgroundCompletedState.agentSources.recentScanCompletions).toEqual([]);
+  });
+
   it("ignores stale scan progress for a stopped job", () => {
     const progressState = appReducer(
       createInitialAppState(),

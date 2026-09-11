@@ -12,7 +12,7 @@ icon: Server
 | 应用配置 | `PATCH /api/app/settings`、`GET/PUT /api/app/model-config`、`POST /api/app/model-config/test` |
 | 账号 | `POST /api/account/send-code`、`POST /api/account/verify-code`、`POST /api/account/logout` |
 | 集成与渠道 | `GET /api/v1/integrations/capabilities`、`POST /api/v1/channels/:provider/connect` |
-| Agent Source | `GET /api/agent-sources`、`POST /api/agent-sources/scan`、`POST /api/agent-sources/:sourceId/skill` |
+| Agent Source | `GET /api/agent-sources`、`POST /api/agent-sources/scan`、`POST /api/agent-sources/:sourceId/skill`（代理到记忆服务） |
 | 本地数据 | `POST /api/local-data/reveal`、`POST /api/local-data/export`、`DELETE /api/local-data` |
 | Memory 代理 | `/api/v1/memory/*`、`/api/v1/panel/*`（代理到 Memory Runtime） |
 | MCP bridge | `GET/POST/DELETE /mcp/composio`（独立 `x-memmy-mcp-token`） |
@@ -20,3 +20,7 @@ icon: Server
 ## SSE 事件
 
 `/api/events` 推送：`app.connected`、`app.heartbeat`、`agent_source.scan_progress`、`agent_source.scan_completed`。
+
+跨 Agent 扫描由记忆服务执行，桌面后端轮询它的 `scan/status` 再转成上面两个事件，所以两个扫描事件都带 `origin`
+（`app` / `viewer` / `cli` / `automation`）：只有 `app` 才是这个界面发起的。SSE 只表示「还活着」，重连后要重新拉一次
+`GET /api/agent-sources/scan/status` 才算拿到真相。

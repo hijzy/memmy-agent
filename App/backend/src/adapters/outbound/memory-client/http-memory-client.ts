@@ -1,6 +1,8 @@
 /** Http memory client module. */
 import {
   AddMemoryOutputSchema,
+  AgentSourceMemoryPluginConflictsResponseSchema,
+  AgentSourceViewSchema,
   ApiErrorBodySchema,
   CloseSessionOutputSchema,
   CompleteTurnOutputSchema,
@@ -8,12 +10,19 @@ import {
   DeletePanelTaskOutputSchema,
   EnqueueImportSummariesOutputSchema,
   GetMemoryOutputSchema,
+  ManagedAgentSourceImportResultSchema,
+  MemoryAgentSourceConnectionOutputSchema,
+  MemoryAgentSourceListOutputSchema,
+  MemoryAgentSourceScanAcceptedSchema,
+  MemoryAgentSourceScanStatusSchema,
   MemoryApiLogsOutputSchema,
   MemoryHealthSnapshotSchema,
   MemoryPatchConfigOutputSchema,
   MemoryProcessingStatusOutputSchema,
   MemoryReloadConfigOutputSchema,
+  OkResponseSchema,
   RecallEvidenceOutputSchema,
+  ScanResultPageSchema,
   PanelAnalysisOutputSchema,
   PanelItemsOutputSchema,
   PanelOverviewOutputSchema,
@@ -274,9 +283,115 @@ export function createHttpMemoryClient(
           tools: input.tools?.join(",")
         }
       });
+    },
+
+    async listAgentSources() {
+      return request("GET", "agentSources", MemoryAgentSourceListOutputSchema);
+    },
+
+    async startAgentSourceScan(input) {
+      // Starting a scan twice would not be idempotent: the second request is
+      // rejected as a conflict, or worse, taken as approval to import a batch
+      // the user has not seen.
+      return request("POST", "agentSourceScan", MemoryAgentSourceScanAcceptedSchema, {
+        body: input,
+        headers: VIEWER_WRITE_HEADERS,
+        maxRetries: 0
+      });
+    },
+
+    async agentSourceScanStatus() {
+      // Polled while a scan runs, so a stalled retry chain would be worse than
+      // a missed sample.
+      return request("GET", "agentSourceScanStatus", MemoryAgentSourceScanStatusSchema, { maxRetries: 0 });
+    },
+
+    async agentSourceScanResults(input) {
+      return request("GET", "agentSourceScanResults", ScanResultPageSchema, {
+        params: { jobId: input.jobId },
+        query: { cursor: input.cursor, limit: input.limit }
+      });
+    },
+
+    async pauseAgentSourceScan() {
+      return request("POST", "agentSourceScanStop", OkResponseSchema, {
+        body: {},
+        headers: VIEWER_WRITE_HEADERS
+      });
+    },
+
+    async cancelAgentSourceScan() {
+      return request("POST", "agentSourceScanCancel", OkResponseSchema, {
+        body: {},
+        headers: VIEWER_WRITE_HEADERS
+      });
+    },
+
+    async mutateAgentSourceConnection(input) {
+      return request(input.method, input.kind === "plugin" ? "agentSourcePlugin" : "agentSourceSkill", MemoryAgentSourceConnectionOutputSchema, {
+        params: { id: input.sourceId },
+        body: {},
+        headers: VIEWER_WRITE_HEADERS
+      });
+    },
+
+    async detectAgentSourcePluginConflicts() {
+      return request("GET", "agentSourcePluginConflicts", AgentSourceMemoryPluginConflictsResponseSchema);
+    },
+
+    async addManualAgentSource(input) {
+      return request("POST", "agentSourceManual", AgentSourceViewSchema, {
+        body: input,
+        headers: VIEWER_WRITE_HEADERS,
+        maxRetries: 0
+      });
+    },
+
+    async updateManualAgentSource(sourceId, input) {
+      return request("PATCH", "agentSource", AgentSourceViewSchema, {
+        params: { id: sourceId },
+        body: input,
+        headers: VIEWER_WRITE_HEADERS
+      });
+    },
+
+    async removeManualAgentSource(sourceId) {
+      return request("DELETE", "agentSource", OkResponseSchema, {
+        params: { id: sourceId },
+        body: {},
+        headers: VIEWER_WRITE_HEADERS
+      });
+    },
+
+    async importManualAgentSource(sourceId, input) {
+      // Each page advances the sync boundary, so a retried page would be
+      // counted twice.
+      return request("POST", "agentSourceImport", ManagedAgentSourceImportResultSchema, {
+        params: { id: sourceId },
+        body: input,
+        headers: VIEWER_WRITE_HEADERS,
+        maxRetries: 0
+      });
+    },
+
+    async syncManualAgentSource(sourceId) {
+      return request("POST", "agentSourceSync", ManagedAgentSourceImportResultSchema, {
+        params: { id: sourceId },
+        body: {},
+        headers: VIEWER_WRITE_HEADERS,
+        maxRetries: 0
+      });
     }
   };
 }
+
+/**
+ * Agent source routes belong to the memory service's local Viewer API, which
+ * rejects state-changing requests without this marker header (its CSRF guard,
+ * not an auth token) and requires a JSON content type, which is why the
+ * bodiless calls above still send `{}`.
+ */
+const VIEWER_WRITE_HEADERS = Object.freeze({ "x-memmy-viewer": "1" });
 
 function combineAbortSignals(primary: AbortSignal, secondary: AbortSignal | undefined): AbortSignal {
   if (!secondary) {

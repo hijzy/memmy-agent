@@ -37,6 +37,8 @@ export function statusForCode(code: ApiErrorBody["error"]["code"]): number {
       return 409;
     case "rate_limited":
       return 429;
+    case "agent_source_unavailable":
+      return 409;
     default:
       return 500;
   }

@@ -19,7 +19,7 @@ import {
 import { createMemoryScanPreferencesStore } from "./infrastructure/memmy-config/agent-access.js";
 import { createPermissionManager } from "./permission/index.js";
 import { createLocalApiServer } from "./adapters/inbound/local-api/server.js";
-import { createBackendServices, type BootstrapScenario } from "./services/index.js";
+import { createBackendServices, type BackendServices, type BootstrapScenario } from "./services/index.js";
 import { resolveCloudClientConfig, type CloudClientConfig } from "./config/service-urls.js";
 import { resetAccountRuntimeForDesktopInstallChange } from "./services/desktop-install-state-service.js";
 import {
@@ -78,6 +78,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   }
   const appStateStore = createAppStateStore({ databasePath: options.databasePath });
   let server: Awaited<ReturnType<typeof createLocalApiServer>> | null = null;
+  let startedServices: BackendServices | null = null;
 
   try {
     if (options.desktopInstallFingerprint) {
@@ -107,7 +108,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         `Memory config reload failed during desktop startup: ${error instanceof Error ? error.message : String(error)}`
       );
     });
-    const scanProcess = options.memoryClient ? undefined : { databasePath: appStateStore.databasePath };
     const cloudConfig = resolveCloudClientConfig(process.env);
     const cloudClient = options.cloudClient ?? createDefaultCloudClient(
       cloudConfig,
@@ -120,7 +120,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       });
     const memmyConfigWriter = createMemmyConfigWriter({ configPath: memmyConfigPath });
     const configuredTimeZone = await readConfiguredAgentTimeZone(memmyConfigPath);
-    const services = createBackendServices({
+    const services: BackendServices = createBackendServices({
       appStateStore,
       agentAdapterRegistry,
       memoryClient,
@@ -141,9 +141,10 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       services,
       composioMcpToken,
       timeZone: configuredTimeZone,
-      heartbeatIntervalMs: options.heartbeatIntervalMs,
-      scanProcess
+      heartbeatIntervalMs: options.heartbeatIntervalMs
     });
+    startedServices = services;
+    services.agentSourceScanRelay.start();
     await server.listen({ host: "127.0.0.1", port: 0 });
 
     const address = server.server.address();
@@ -184,11 +185,13 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         return appStateStore.repositories.bootstrap.recordLastLaunchMode(mode);
       },
       async close() {
+        await services.agentSourceScanRelay.stop();
         await boundServer.close();
         appStateStore.close();
       }
     };
   } catch (error) {
+    await startedServices?.agentSourceScanRelay.stop().catch(() => undefined);
     await server?.close().catch(() => undefined);
     appStateStore.close();
     throw error;

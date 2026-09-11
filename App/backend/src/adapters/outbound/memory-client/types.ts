@@ -1,7 +1,12 @@
 /** Types module. */
 import type {
+  AddManualInput,
   AddMemoryInput,
   AddMemoryOutput,
+  AgentSourceScanMode,
+  AgentSourceScanOrigin,
+  AgentSourceMemoryPluginConflictsResponse,
+  AgentSourceView,
   CloseSessionInput,
   CloseSessionOutput,
   DeleteMemoryInput,
@@ -11,6 +16,13 @@ import type {
   CompleteTurnOutput,
   EnqueueImportSummariesOutput,
   GetMemoryOutput,
+  ManagedAgentSourceImportInput,
+  ManagedAgentSourceImportResult,
+  ManagedAgentSourceUpdateInput,
+  MemoryAgentSourceConnectionOutput,
+  MemoryAgentSourceListOutput,
+  MemoryAgentSourceScanAccepted,
+  MemoryAgentSourceScanStatus,
   MemoryApiLogsInput,
   MemoryApiLogsOutput,
   MemoryHealthSnapshot,
@@ -19,7 +31,9 @@ import type {
   MemoryProcessingStatusOutput,
   MemoryReloadConfigInput,
   MemoryReloadConfigOutput,
+  OkResponse,
   RecallEvidenceOutput,
+  ScanResultPage,
   PanelAnalysisOutput,
   PanelItemsInput,
   PanelItemsOutput,
@@ -79,4 +93,30 @@ export interface MemoryClient {
   panelTasks(input: PanelTasksInput, context?: MemoryRequestContext): Promise<PanelTasksOutput>;
   deletePanelTask(taskId: string, context?: MemoryRequestContext): Promise<DeletePanelTaskOutput>;
   memoryApiLogs(input: MemoryApiLogsInput, context?: MemoryRequestContext): Promise<MemoryApiLogsOutput>;
+
+  /**
+   * Cross-Agent scanning lives in the memory service, next to the memories it
+   * writes. Memmy Desktop forwards its own Agent source routes to these.
+   */
+  listAgentSources(): Promise<MemoryAgentSourceListOutput>;
+  startAgentSourceScan(input: {
+    sourceId: string;
+    mode?: AgentSourceScanMode;
+    origin: AgentSourceScanOrigin;
+  }): Promise<MemoryAgentSourceScanAccepted>;
+  agentSourceScanStatus(): Promise<MemoryAgentSourceScanStatus>;
+  agentSourceScanResults(input: { jobId: string; cursor?: string; limit?: number }): Promise<ScanResultPage>;
+  pauseAgentSourceScan(): Promise<OkResponse>;
+  cancelAgentSourceScan(): Promise<OkResponse>;
+  mutateAgentSourceConnection(input: {
+    sourceId: string;
+    kind: "plugin" | "skill";
+    method: "POST" | "DELETE";
+  }): Promise<MemoryAgentSourceConnectionOutput>;
+  detectAgentSourcePluginConflicts(): Promise<AgentSourceMemoryPluginConflictsResponse>;
+  addManualAgentSource(input: AddManualInput): Promise<AgentSourceView>;
+  updateManualAgentSource(sourceId: string, input: ManagedAgentSourceUpdateInput): Promise<AgentSourceView>;
+  removeManualAgentSource(sourceId: string): Promise<OkResponse>;
+  importManualAgentSource(sourceId: string, input: ManagedAgentSourceImportInput): Promise<ManagedAgentSourceImportResult>;
+  syncManualAgentSource(sourceId: string): Promise<ManagedAgentSourceImportResult>;
 }

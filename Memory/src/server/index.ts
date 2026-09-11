@@ -163,9 +163,8 @@ Options:
   --host <host>         Loopback listen address (default: 127.0.0.1)
   --port <port>         Listen port (default: 18960)
   --no-agent-source-automation
-                        Serve the scan API but never schedule scans on a timer.
-                        Memmy Desktop passes this because it still runs its own
-                        scanner; a standalone service leaves it off.
+                        Serve the scan API but never schedule scans on a timer,
+                        for a host that drives scanning itself.
   -h, --help            Show this help message
   --version             Show the service version
 `;

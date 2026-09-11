@@ -469,6 +469,10 @@ export const OnboardingInsightReportStreamEventSchema = z.discriminatedUnion("ty
 ]);
 export type OnboardingInsightReportStreamEvent = z.infer<typeof OnboardingInsightReportStreamEventSchema>;
 
+/** Who asked for a scan, so a UI only reports progress for its own runs. */
+export const AgentSourceScanOriginSchema = z.enum(["app", "viewer", "cli", "automation"]);
+export type AgentSourceScanOrigin = z.infer<typeof AgentSourceScanOriginSchema>;
+
 /** Schema for agent source scan job response. */
 export const AgentSourceScanJobResponseSchema = z.object({
     jobId: z.string().min(1)
@@ -481,7 +485,13 @@ export const AgentSourceScanProgressPayloadSchema = z.object({
     phase: ScanPhaseSchema,
     current: z.number().int().nonnegative(),
     total: z.number().int().nonnegative(),
-    message: z.string().optional()
+    message: z.string().optional(),
+    /**
+     * Who asked for this scan. Scans now start in the memory service, so the
+     * Desktop UI also sees runs it did not start: the Viewer's, the CLI's, and
+     * the hourly automation's. Absent means the run predates the field.
+     */
+    origin: AgentSourceScanOriginSchema.optional()
 });
 export type AgentSourceScanProgressPayload = z.infer<typeof AgentSourceScanProgressPayloadSchema>;
 
@@ -492,10 +502,68 @@ export const AgentSourceScanStatusResponseSchema = z.object({
         jobId: z.string().min(1),
         sourceId: z.string().min(1),
         succeeded: z.boolean(),
-        completedAt: z.string().datetime()
+        completedAt: z.string().datetime(),
+        origin: AgentSourceScanOriginSchema.optional()
     }).nullable().optional()
 });
 export type AgentSourceScanStatusResponse = z.infer<typeof AgentSourceScanStatusResponseSchema>;
+
+/**
+ * The memory service owns cross-Agent scanning; these are the shapes it
+ * returns. The Desktop backend forwards its routes to them.
+ */
+
+export const MemoryAgentSourceListOutputSchema = z.object({
+    executorAvailable: z.literal(true),
+    sources: z.array(AgentSourceViewSchema)
+});
+export type MemoryAgentSourceListOutput = z.infer<typeof MemoryAgentSourceListOutputSchema>;
+
+export const MemoryAgentSourceScanAcceptedSchema = z.object({
+    accepted: z.literal(true),
+    jobId: z.string().min(1)
+});
+export type MemoryAgentSourceScanAccepted = z.infer<typeof MemoryAgentSourceScanAcceptedSchema>;
+
+export const MemoryAgentSourceScanStatusSchema = z.object({
+    running: z.boolean(),
+    jobId: z.string().min(1).nullable(),
+    sourceId: z.string().min(1).nullable(),
+    mode: AgentSourceScanModeSchema.nullable(),
+    origin: AgentSourceScanOriginSchema.nullable(),
+    progress: z.object({
+        sourceId: z.string().min(1),
+        phase: ScanPhaseSchema,
+        current: z.number().int().nonnegative(),
+        total: z.number().int().nonnegative(),
+        message: z.string().optional()
+    }).nullable(),
+    startedAt: z.string().datetime().nullable(),
+    completedAt: z.string().datetime().nullable(),
+    error: z.string().nullable(),
+    sources: z.array(z.object({
+        sourceId: z.string().min(1),
+        discoveredConversations: z.number().int().nonnegative(),
+        emittedMessages: z.number().int().nonnegative(),
+        written: z.number().int().nonnegative(),
+        skipped: z.number().int().nonnegative(),
+        errorCount: z.number().int().nonnegative()
+    })).default([]),
+    /** Set when a routine run selected more turns than one run may import. */
+    pendingAdditions: z.object({
+        sourceId: z.string().min(1),
+        selected: z.number().int().nonnegative(),
+        budget: z.number().int().nonnegative()
+    }).nullable().default(null)
+});
+export type MemoryAgentSourceScanStatus = z.infer<typeof MemoryAgentSourceScanStatusSchema>;
+
+export const MemoryAgentSourceConnectionOutputSchema = z.object({
+    ok: z.literal(true),
+    sourceId: z.string().min(1),
+    status: AgentSourceStatusSchema
+});
+export type MemoryAgentSourceConnectionOutput = z.infer<typeof MemoryAgentSourceConnectionOutputSchema>;
 
 /** Schema for scan preferences. */
 export const ScanPreferencesSchema = z.object({
@@ -1506,7 +1574,8 @@ export const ScanCompletedSseEventSchema = z.object({
     payload: z.object({
         jobId: z.string().min(1),
         sourceId: z.string().min(1),
-        results: z.array(ScanResultSchema)
+        results: z.array(ScanResultSchema),
+        origin: AgentSourceScanOriginSchema.optional()
     })
 });
 

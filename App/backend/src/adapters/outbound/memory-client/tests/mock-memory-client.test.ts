@@ -73,8 +73,21 @@ describe("createMockMemoryClient", () => {
     const client = createMockMemoryClient();
 
     expect(Object.keys(client).sort()).toEqual([
+      "addManualAgentSource",
       "addMemory",
+      "agentSourceScanResults",
+      "agentSourceScanStatus",
+      "cancelAgentSourceScan",
       "closeSession",
+      "detectAgentSourcePluginConflicts",
+      "importManualAgentSource",
+      "listAgentSources",
+      "mutateAgentSourceConnection",
+      "pauseAgentSourceScan",
+      "removeManualAgentSource",
+      "startAgentSourceScan",
+      "syncManualAgentSource",
+      "updateManualAgentSource",
       "completeTurn",
       "deleteMemory",
       "enqueueImportSummaries",

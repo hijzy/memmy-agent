@@ -3,7 +3,13 @@ import { ASR_DEFAULT_BASE_URL, QWEN_ASR_MODEL_ID, type AgentSourceView, type App
 import type { AppRoutePath, PreferredMode } from "../app/routes.js";
 import type { InvitationToastKind } from "../app/invitation-result.js";
 import type { ModelProviderConfig } from "../api/config-client.js";
-import type { AgentSourceScanCompletion, AgentSourceScanProgress, AppAction, EventConnectionStatus } from "./app-actions.js";
+import {
+  startedInThisApp,
+  type AgentSourceScanCompletion,
+  type AgentSourceScanProgress,
+  type AppAction,
+  type EventConnectionStatus
+} from "./app-actions.js";
 import { agentReducer, initialAgentState, type AgentAction, type AgentState } from "./agent-chat-slice.js";
 import { initialToolsState, toolsReducer, type ToolsAction, type ToolsState } from "./tools-slice.js";
 
@@ -270,6 +276,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         agentSources: { ...state.agentSources, isScanning: true, activeScanSourceId: action.sourceId, error: null, scanProgress: null }
       };
     case "agentSources/scanProgress":
+      if (!startedInThisApp(action.progress.origin)) {
+        return state;
+      }
       if (state.agentSources.finishedScanJobIds.includes(action.progress.jobId)) {
         return state;
       }
@@ -292,6 +301,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         }
       };
     case "agentSources/scanCompleted":
+      if (action.scan && !startedInThisApp(action.scan.origin)) {
+        return state;
+      }
       return {
         ...state,
         agentSources: {

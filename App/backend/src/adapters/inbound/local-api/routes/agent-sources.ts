@@ -16,96 +16,57 @@ import {
   OkResponseSchema
 } from "@memmy/local-api-contracts";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { fork, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
-import type { PermissionManager } from "../../../../permission/index.js";
+import { MemoryLayerError } from "../../../outbound/memory-client/errors.js";
+import type { MemoryClient } from "../../../outbound/memory-client/types.js";
 import { withErrorEnvelope } from "../../../../services/error-envelope.js";
 import type { AgentSourceAutoInjectService } from "../../../../services/agent-source-auto-inject-service.js";
-import type { AgentSourceService } from "../../../../services/agent-source-service.js";
-import {
-  deleteDurableScanStore,
-  deletePersistedScanResume,
-  readDurableScanResults,
-  readLatestPersistedScanResume
-} from "../../../../services/agent-source-scan-journal.js";
-import { migrateLegacyScanJournals } from "../../../../services/agent-source-scan-migration.js";
-import type { ProgressBus } from "../../../../services/progress-bus.js";
-import {
-  type AgentSourceScanJobState,
-  type AgentSourceScanProcessCommand,
-  type AgentSourceScanProcessData,
-  type AgentSourceScanProcessMessage,
-  isScanResumeStateReference,
-  type PipelineProgress,
-  progressForResume,
-  runAgentSourceScanJob,
-  type RouteScanResumeState,
-  toStoppedProgress
-} from "../../../../services/agent-source-scan-runner.js";
+import type { AgentSourceConnectionService } from "../../../../services/agent-source-connection-service.js";
+import type { AgentSourceScanRelay } from "../../../../services/agent-source-scan-relay.js";
 
-/** Contract for register agent source routes options. */
+/**
+ * The memory service owns cross-Agent scanning: it holds the watermarks, runs
+ * the scans and hands out the job ids. These routes stay as Memmy Desktop's
+ * public shape and forward to it, so the two never disagree about a scan.
+ */
 export interface RegisterAgentSourceRoutesOptions {
-  agentSources: AgentSourceService;
+  memoryClient: Pick<
+    MemoryClient,
+    | "listAgentSources"
+    | "startAgentSourceScan"
+    | "agentSourceScanResults"
+    | "pauseAgentSourceScan"
+    | "cancelAgentSourceScan"
+    | "detectAgentSourcePluginConflicts"
+    | "addManualAgentSource"
+    | "updateManualAgentSource"
+    | "removeManualAgentSource"
+    | "importManualAgentSource"
+    | "syncManualAgentSource"
+  >;
+  agentSourceConnections: AgentSourceConnectionService;
   agentSourceAutoInject: AgentSourceAutoInjectService;
-  progressBus: ProgressBus;
-  permissionManager: Pick<PermissionManager, "canScanAgentSource">;
+  scanRelay: AgentSourceScanRelay;
   authenticateRuntimeToken: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
-  scanProcess?: {
-    databasePath: string;
-  };
 }
 
 /** Registers register agent source routes. */
 export function registerAgentSourceRoutes(app: FastifyInstance, options: RegisterAgentSourceRoutesOptions): void {
-  type ActiveScanJob = Omit<AgentSourceScanJobState, "resume"> & {
-    resume: RouteScanResumeState | null;
-    process?: ChildProcess;
-  };
-
-  let activeScanJob: ActiveScanJob | null = null;
-  type PausedScanJob = {
-    jobId: string;
-    sourceId: string;
-    mode?: AgentSourceScanJobState["mode"];
-    lastProgress: PipelineProgress & { jobId: string };
-    resume: RouteScanResumeState | null;
-  };
-  if (options.scanProcess?.databasePath) migrateLegacyScanJournals(options.scanProcess.databasePath);
-  const restoredScanJob = toPausedScanJob(readLatestPersistedScanResume(options.scanProcess?.databasePath));
-  let pausedScanJob: PausedScanJob | null = restoredScanJob;
-  let lastScanProgress: (PipelineProgress & { jobId: string }) | null = restoredScanJob?.lastProgress ?? null;
-  let lastScanCompletion: {
-    jobId: string;
-    sourceId: string;
-    succeeded: boolean;
-    completedAt: string;
-  } | null = null;
-
-  app.addHook("onClose", async () => {
-    if (!activeScanJob) {
-      return;
-    }
-
-    const closingJob = activeScanJob;
-    activeScanJob = null;
-    abortScanJob(closingJob);
-    pausedScanJob = null;
-    closingJob.process?.kill();
-  });
-
-  app.get("/api/agent-sources", { preHandler: options.authenticateRuntimeToken }, async (_request, reply) => {
-    const response = AgentSourceViewSchema.array().parse(await options.agentSources.list());
-    return reply.send(response);
-  });
+  app.get(
+    "/api/agent-sources",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (_request, reply) => {
+      const output = await options.memoryClient.listAgentSources();
+      return reply.send(AgentSourceViewSchema.array().parse(output.sources));
+    })
+  );
 
   app.get(
     "/api/agent-sources/memory-plugin-conflicts",
     { preHandler: options.authenticateRuntimeToken },
-    async (_request, reply) => {
-      const conflicts = await options.agentSources.detectMemoryPluginConflicts();
-      return reply.send(AgentSourceMemoryPluginConflictsResponseSchema.parse({ conflicts }));
-    }
+    withErrorEnvelope(async (_request, reply) => {
+      const response = await options.memoryClient.detectAgentSourcePluginConflicts();
+      return reply.send(AgentSourceMemoryPluginConflictsResponseSchema.parse(response));
+    })
   );
 
   app.post(
@@ -117,138 +78,77 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     })
   );
 
-  app.get("/api/agent-sources/scan/status", { preHandler: options.authenticateRuntimeToken }, async (_request, reply) => {
-    if (activeScanJob?.controller.signal.aborted) {
-      lastScanProgress = toStoppedProgress(activeScanJob.jobId, activeScanJob.lastProgress);
-      pausedScanJob = {
-        jobId: activeScanJob.jobId,
-        sourceId: activeScanJob.sourceId,
-        mode: activeScanJob.mode,
-        lastProgress: lastScanProgress,
-        resume: activeScanJob.resume
-      };
-      activeScanJob = null;
-    }
-    const progress = activeScanJob
-      ? { jobId: activeScanJob.jobId, ...activeScanJob.lastProgress }
-      : lastScanProgress?.phase === "stopped" ? lastScanProgress : null;
-    const completion = recentScanCompletion(lastScanCompletion);
-    return reply.send(AgentSourceScanStatusResponseSchema.parse({
-      active: Boolean(activeScanJob),
-      progress,
-      ...(completion ? { completion } : {})
-    }));
-  });
+  app.get(
+    "/api/agent-sources/scan/status",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (_request, reply) => {
+      // Progress events are a liveness hint; this answer is the truth, so it is
+      // read from the memory service rather than from what the relay last saw.
+      return reply.send(AgentSourceScanStatusResponseSchema.parse(await options.scanRelay.poll()));
+    })
+  );
 
-  app.get("/api/agent-sources/scan/jobs/:jobId/results", { preHandler: options.authenticateRuntimeToken }, async (request, reply) => {
-    if (!options.scanProcess) return reply.send({ items: [], nextCursor: null });
-    const params = request.params as { jobId: string };
-    const query = request.query as { cursor?: string; limit?: string };
-    const limit = Math.min(500, Math.max(1, Number.parseInt(query.limit ?? "100", 10) || 100));
-    const cursor = query.cursor ?? "0";
-    return reply.send(ScanResultPageSchema.parse(readDurableScanResults(options.scanProcess.databasePath, params.jobId, cursor, limit)));
-  });
-
-  app.post("/api/agent-sources/scan", { preHandler: options.authenticateRuntimeToken }, async (request, reply) => {
-    const input = AgentSourceScanInputSchema.parse(request.body);
-    const sourceId = input.sourceId;
-    const mode = input.mode;
-
-    if (!(await options.permissionManager.canScanAgentSource({ agentSourceId: sourceId }))) {
-      return reply.code(403).send({
-        error: {
-          code: "scan_not_permitted",
-          message: "scan not permitted"
-        }
+  app.get(
+    "/api/agent-sources/scan/jobs/:jobId/results",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const params = request.params as { jobId: string };
+      const query = request.query as { cursor?: string; limit?: string };
+      const limit = Math.min(500, Math.max(1, Number.parseInt(query.limit ?? "100", 10) || 100));
+      const page = await options.memoryClient.agentSourceScanResults({
+        jobId: params.jobId,
+        cursor: query.cursor ?? "0",
+        limit
       });
-    }
+      return reply.send(ScanResultPageSchema.parse(page));
+    })
+  );
 
-    if (activeScanJob?.controller.signal.aborted) {
-      activeScanJob = null;
-    }
-    if (activeScanJob) {
-      return reply.send(AgentSourceScanJobResponseSchema.parse({ jobId: activeScanJob.jobId }));
-    }
+  app.post(
+    "/api/agent-sources/scan",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const input = AgentSourceScanInputSchema.parse(request.body);
+      const jobId = await startScan(input.sourceId, input.mode);
+      void options.scanRelay.poll();
+      return reply.send(AgentSourceScanJobResponseSchema.parse({ jobId }));
+    })
+  );
 
-    const pausedJob = pausedScanJob && pausedScanJob.sourceId === sourceId && pausedScanJob.mode === mode
-      && (pausedScanJob.resume || options.scanProcess)
-      ? pausedScanJob
-      : null;
-    if (!pausedJob) {
-      cleanupResumeState(pausedScanJob?.resume ?? null);
-      pausedScanJob = null;
-    }
-    const jobId = pausedJob?.jobId ?? randomUUID();
-    lastScanCompletion = null;
-    const controller = new AbortController();
-    activeScanJob = {
-      jobId,
-      sourceId,
-      mode,
-      controller,
-      lastProgress: pausedJob?.resume ? progressForResume(pausedJob.resume, pausedJob.lastProgress) : {
-        sourceId,
-        phase: "scan",
-        current: 0,
-        total: 0,
-        message: "Agent source scan queued"
-      },
-      resume: pausedJob?.resume ?? null
-    };
-    lastScanProgress = { jobId, ...activeScanJob.lastProgress };
-    if (pausedJob) {
-      pausedScanJob = null;
-    }
-    options.progressBus.emit("agent_source.scan_progress", {
-      jobId,
-      ...activeScanJob.lastProgress
-    });
+  app.post(
+    "/api/agent-sources/scan/stop",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (_request, reply) => {
+      try {
+        await options.memoryClient.pauseAgentSourceScan();
+      } catch (error) {
+        // Stopping a scan that already ended is what the caller wanted anyway.
+        if (!isConflict(error)) throw error;
+      }
+      await options.scanRelay.poll();
+      return reply.send(OkResponseSchema.parse({ ok: true }));
+    })
+  );
 
-    const scanJob = activeScanJob;
-    setImmediate(() => {
-      startScanJob(scanJob);
-    });
-    return reply.send(AgentSourceScanJobResponseSchema.parse({ jobId }));
-  });
+  app.post(
+    "/api/agent-sources/scan/cancel",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (_request, reply) => {
+      await options.memoryClient.cancelAgentSourceScan();
+      options.scanRelay.abandon();
+      return reply.send(OkResponseSchema.parse({ ok: true }));
+    })
+  );
 
-  app.post("/api/agent-sources/scan/stop", { preHandler: options.authenticateRuntimeToken }, async (_request, reply) => {
-    if (activeScanJob) {
-      const stoppedJob = activeScanJob;
-      activeScanJob = null;
-      abortScanJob(stoppedJob);
-      lastScanProgress = toStoppedProgress(stoppedJob.jobId, stoppedJob.lastProgress);
-      pausedScanJob = {
-        jobId: stoppedJob.jobId,
-        sourceId: stoppedJob.sourceId,
-        mode: stoppedJob.mode,
-        lastProgress: lastScanProgress,
-        resume: stoppedJob.resume
-      };
-      emitStoppedProgress(stoppedJob.jobId, options.progressBus, stoppedJob.lastProgress);
-    }
-    return reply.send(OkResponseSchema.parse({ ok: true }));
-  });
-
-  app.post("/api/agent-sources/scan/cancel", { preHandler: options.authenticateRuntimeToken }, async (_request, reply) => {
-    if (activeScanJob) {
-      const canceledJob = activeScanJob;
-      activeScanJob = null;
-      abortScanJob(canceledJob);
-      cleanupResumeState(canceledJob.resume);
-      deleteDurableScanStore(options.scanProcess?.databasePath, canceledJob.jobId);
-    }
-    cleanupResumeState(pausedScanJob?.resume ?? null);
-    if (pausedScanJob) deleteDurableScanStore(options.scanProcess?.databasePath, pausedScanJob.jobId);
-    pausedScanJob = null;
-    lastScanProgress = null;
-    return reply.send(OkResponseSchema.parse({ ok: true }));
-  });
-
-  app.post("/api/agent-sources/manual", { preHandler: options.authenticateRuntimeToken }, async (request, reply) => {
-    const input = AddManualInputSchema.parse(request.body);
-    const response = AgentSourceViewSchema.parse(await options.agentSources.addManual(input));
-    return reply.send(response);
-  });
+  app.post(
+    "/api/agent-sources/manual",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const input = AddManualInputSchema.parse(request.body);
+      const response = await options.memoryClient.addManualAgentSource(input);
+      return reply.send(AgentSourceViewSchema.parse(response));
+    })
+  );
 
   app.post(
     "/api/agent-sources/:sourceId/managed/import",
@@ -256,7 +156,7 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     withErrorEnvelope(async (request, reply) => {
       const params = AgentSourceIdParamsSchema.parse(request.params);
       const input = ManagedAgentSourceImportInputSchema.parse(request.body);
-      const response = await options.agentSources.importManaged(params.sourceId, input);
+      const response = await options.memoryClient.importManualAgentSource(params.sourceId, input);
       return reply.send(ManagedAgentSourceImportResultSchema.parse(response));
     })
   );
@@ -266,15 +166,7 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     { preHandler: options.authenticateRuntimeToken },
     withErrorEnvelope(async (request, reply) => {
       const params = AgentSourceIdParamsSchema.parse(request.params);
-      if (!(await options.permissionManager.canScanAgentSource({ agentSourceId: params.sourceId }))) {
-        return reply.code(403).send({
-          error: {
-            code: "scan_not_permitted",
-            message: "scan not permitted"
-          }
-        });
-      }
-      const response = await options.agentSources.syncManaged(params.sourceId);
+      const response = await options.memoryClient.syncManualAgentSource(params.sourceId);
       return reply.send(ManagedAgentSourceImportResultSchema.parse(response));
     })
   );
@@ -285,7 +177,7 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     withErrorEnvelope(async (request, reply) => {
       const params = AgentSourceIdParamsSchema.parse(request.params);
       const input = ManagedAgentSourceUpdateInputSchema.parse(request.body);
-      const response = await options.agentSources.updateManaged(params.sourceId, input);
+      const response = await options.memoryClient.updateManualAgentSource(params.sourceId, input);
       return reply.send(AgentSourceViewSchema.parse(response));
     })
   );
@@ -293,11 +185,11 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
   app.delete(
     "/api/agent-sources/:sourceId",
     { preHandler: options.authenticateRuntimeToken },
-    async (request, reply) => {
+    withErrorEnvelope(async (request, reply) => {
       const params = AgentSourceIdParamsSchema.parse(request.params);
-      await options.agentSources.remove(params.sourceId);
+      await options.memoryClient.removeManualAgentSource(params.sourceId);
       return reply.send(OkResponseSchema.parse({ ok: true }));
-    }
+    })
   );
 
   app.post(
@@ -305,7 +197,17 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     { preHandler: options.authenticateRuntimeToken },
     withErrorEnvelope(async (request, reply) => {
       const params = AgentSourceIdParamsSchema.parse(request.params);
-      await options.agentSources.installSkill(params.sourceId);
+      await options.agentSourceConnections.connect(params.sourceId, "skill");
+      return reply.send(OkResponseSchema.parse({ ok: true }));
+    })
+  );
+
+  app.delete(
+    "/api/agent-sources/:sourceId/skill",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const params = AgentSourceIdParamsSchema.parse(request.params);
+      await options.agentSourceConnections.disconnect(params.sourceId, "skill");
       return reply.send(OkResponseSchema.parse({ ok: true }));
     })
   );
@@ -316,7 +218,7 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     withErrorEnvelope(async (request, reply) => {
       const params = AgentSourceIdParamsSchema.parse(request.params);
       const action = AgentSourcePluginActionInputSchema.parse(request.body ?? {});
-      await options.agentSources.installPlugin(params.sourceId, action);
+      await options.agentSourceConnections.connect(params.sourceId, "plugin", action.installType);
       return reply.send(OkResponseSchema.parse({ ok: true }));
     })
   );
@@ -327,304 +229,32 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     withErrorEnvelope(async (request, reply) => {
       const params = AgentSourceIdParamsSchema.parse(request.params);
       const action = AgentSourcePluginActionInputSchema.parse(request.body ?? {});
-      await options.agentSources.uninstallPlugin(params.sourceId, action);
+      await options.agentSourceConnections.disconnect(params.sourceId, "plugin", action.installType);
       return reply.send(OkResponseSchema.parse({ ok: true }));
     })
   );
 
-  app.delete(
-    "/api/agent-sources/:sourceId/skill",
-    { preHandler: options.authenticateRuntimeToken },
-    withErrorEnvelope(async (request, reply) => {
-      const params = AgentSourceIdParamsSchema.parse(request.params);
-      await options.agentSources.uninstallSkill(params.sourceId);
-      return reply.send(OkResponseSchema.parse({ ok: true }));
-    })
-  );
-
-  function startScanJob(scanJob: ActiveScanJob): void {
-    if (scanJob.controller.signal.aborted) {
-      if (!options.scanProcess) {
-        startInlineScanJob(scanJob);
-      }
-      return;
-    }
-
-    if (activeScanJob?.jobId !== scanJob.jobId) {
-      return;
-    }
-
-    if (options.scanProcess) {
-      startProcessScanJob(scanJob);
-      return;
-    }
-
-    startInlineScanJob(scanJob);
-  }
-
-  function startInlineScanJob(scanJob: ActiveScanJob): void {
-    if (scanJob.resume && isScanResumeStateReference(scanJob.resume)) {
-      handleProcessFailure(scanJob.jobId, new Error("SQLite-backed scan resume requires the scan process"));
-      return;
-    }
-
-    const inlineJob: AgentSourceScanJobState = {
-      jobId: scanJob.jobId,
-      sourceId: scanJob.sourceId,
-      mode: scanJob.mode,
-      controller: scanJob.controller,
-      lastProgress: scanJob.lastProgress,
-      resume: scanJob.resume
-    };
-    void runAgentSourceScanJob(inlineJob, options.agentSources, {
-      onProgress(progress) {
-        updateActiveProgress(scanJob.jobId, progress);
-        options.progressBus.emit("agent_source.scan_progress", {
-          jobId: scanJob.jobId,
-          ...progress
-        });
-      },
-      onResumeChanged(resume) {
-        updateActiveResume(scanJob.jobId, resume);
-      },
-      onCompleted(results) {
-        if (activeScanJob?.jobId !== scanJob.jobId) {
-          return;
-        }
-        lastScanCompletion = scanCompletion(scanJob.jobId, scanJob.sourceId, results);
-        options.progressBus.emit("agent_source.scan_completed", {
-          jobId: scanJob.jobId,
-          sourceId: scanJob.sourceId,
-          results
-        });
-      }
-    }).finally(() => {
-      finishActiveScanJob(scanJob.jobId);
-    });
-  }
-
-  function startProcessScanJob(scanJob: ActiveScanJob): void {
-    if (!options.scanProcess) {
-      return;
-    }
-
-    const processData: AgentSourceScanProcessData = {
-      databasePath: options.scanProcess.databasePath,
-      job: {
-        jobId: scanJob.jobId,
-        sourceId: scanJob.sourceId,
-        mode: scanJob.mode,
-        lastProgress: scanJob.lastProgress,
-        resume: scanJob.resume
-      }
-    };
-    let child: ChildProcess;
+  /**
+   * Asking to scan while a scan is running used to join the running job rather
+   * than fail, and the Desktop UI still counts on that.
+   */
+  async function startScan(sourceId: string, mode?: "initial_subset" | "incremental" | "full"): Promise<string> {
     try {
-      child = fork(fileURLToPath(resolveAgentSourceScanProcessUrl()), [], {
-        env: createScanProcessEnvironment(process.env)
+      const accepted = await options.memoryClient.startAgentSourceScan({
+        sourceId,
+        ...(mode ? { mode } : {}),
+        origin: "app"
       });
+      return accepted.jobId;
     } catch (error) {
-      handleProcessFailure(scanJob.jobId, error instanceof Error ? error : new Error("Agent source scan process failed to start"));
-      return;
-    }
-    scanJob.process = child;
-
-    child.on("message", (message) => {
-      handleProcessMessage(scanJob.jobId, message as AgentSourceScanProcessMessage);
-    });
-    child.on("error", (error) => {
-      handleProcessFailure(scanJob.jobId, error instanceof Error ? error : new Error("Agent source scan process failed"));
-    });
-    child.on("exit", (code, signal) => {
-      if (code !== 0 && activeScanJob?.jobId === scanJob.jobId && !scanJob.controller.signal.aborted) {
-        handleProcessFailure(
-          scanJob.jobId,
-          new Error(`Agent source scan process exited with ${signal ? `signal ${signal}` : `code ${code}`}`)
-        );
-        return;
-      }
-      finishActiveScanJob(scanJob.jobId);
-    });
-
-    const startCommand: AgentSourceScanProcessCommand = { type: "start", data: processData };
-    child.send(startCommand, (error) => {
-      if (error) handleProcessFailure(scanJob.jobId, error);
-    });
-  }
-
-  function handleProcessMessage(jobId: string, message: AgentSourceScanProcessMessage): void {
-    if (activeScanJob?.jobId !== jobId && pausedScanJob?.jobId === jobId && message.type === "resume") {
-      pausedScanJob.resume = message.resume;
-      return;
-    }
-
-    if (activeScanJob?.jobId !== jobId) {
-      return;
-    }
-
-    if (message.type === "progress") {
-      updateActiveProgress(jobId, message.progress);
-      options.progressBus.emit("agent_source.scan_progress", {
-        jobId,
-        ...message.progress
-      });
-      return;
-    }
-
-    if (message.type === "resume") {
-      updateActiveResume(jobId, message.resume);
-      return;
-    }
-
-    if (message.type === "completed") {
-      lastScanCompletion = scanCompletion(jobId, activeScanJob.sourceId, message.results);
-      options.progressBus.emit("agent_source.scan_completed", {
-        jobId,
-        sourceId: activeScanJob.sourceId,
-        results: message.results
-      });
-      finishActiveScanJob(jobId);
-      return;
-    }
-
-    handleProcessFailure(jobId, new Error(message.message));
-  }
-
-  function handleProcessFailure(jobId: string, error: Error): void {
-    if (activeScanJob?.jobId !== jobId) {
-      return;
-    }
-
-    const results = [
-      {
-        sourceId: activeScanJob.sourceId,
-        discoveredConversations: 0,
-        emittedMessages: 0,
-        skipped: 0,
-        errors: [
-          {
-            conversationId: "scan",
-            reason: error.message
-          }
-        ]
-      }
-    ];
-    lastScanCompletion = scanCompletion(jobId, activeScanJob.sourceId, results);
-    options.progressBus.emit("agent_source.scan_completed", {
-      jobId,
-      sourceId: activeScanJob.sourceId,
-      results
-    });
-    const failedJob = activeScanJob;
-    pausedScanJob = {
-      jobId: failedJob.jobId,
-      sourceId: failedJob.sourceId,
-      mode: failedJob.mode,
-      lastProgress: toStoppedProgress(failedJob.jobId, failedJob.lastProgress),
-      resume: failedJob.resume
-    };
-    activeScanJob = null;
-    lastScanProgress = pausedScanJob.lastProgress;
-  }
-
-  function updateActiveProgress(jobId: string, progress: PipelineProgress): void {
-    lastScanProgress = { jobId, ...progress };
-    if (activeScanJob?.jobId === jobId && !activeScanJob.controller.signal.aborted) {
-      activeScanJob.lastProgress = progress;
+      if (!isConflict(error)) throw error;
+      const running = await options.scanRelay.poll();
+      if (running.active && running.progress) return running.progress.jobId;
+      throw error;
     }
   }
-
-  function updateActiveResume(jobId: string, resume: RouteScanResumeState | null): void {
-    if (activeScanJob?.jobId === jobId) {
-      activeScanJob.resume = resume;
-    }
-  }
-
-  function finishActiveScanJob(jobId: string): void {
-    if (activeScanJob?.jobId === jobId) {
-      cleanupResumeState(activeScanJob.resume);
-      activeScanJob = null;
-      lastScanProgress = null;
-      pausedScanJob = null;
-    }
-  }
-
-  function abortScanJob(job: ActiveScanJob): void {
-    job.controller.abort();
-    const command: AgentSourceScanProcessCommand = { type: "abort" };
-    try {
-      if (job.process?.connected) job.process.send(command);
-    } catch {
-      // The process may already have exited while the HTTP stop/cancel request is being handled.
-    }
-  }
-
-  function cleanupResumeState(resume: RouteScanResumeState | null): void {
-    if (!resume || !isScanResumeStateReference(resume)) {
-      return;
-    }
-
-    deletePersistedScanResume(options.scanProcess?.databasePath, resume.jobId);
-  }
-
 }
 
-function toPausedScanJob(
-  persisted: ReturnType<typeof readLatestPersistedScanResume>
-): {
-  jobId: string;
-  sourceId: string;
-  mode?: AgentSourceScanJobState["mode"];
-  lastProgress: PipelineProgress & { jobId: string };
-  resume: RouteScanResumeState;
-} | null {
-  if (!persisted) return null;
-  const total = persisted.resume.phase === "add" ? persisted.resume.messageCount : 0;
-  return {
-    jobId: persisted.jobId,
-    sourceId: persisted.sourceId,
-    mode: persisted.mode,
-    resume: persisted.resume,
-    lastProgress: {
-      jobId: persisted.jobId,
-      sourceId: persisted.sourceId,
-      phase: "stopped",
-      current: 0,
-      total,
-      message: "Agent source scan interrupted and ready to resume"
-    }
-  };
-}
-
-function emitStoppedProgress(jobId: string, progressBus: ProgressBus, lastProgress?: PipelineProgress): void {
-  progressBus.emit("agent_source.scan_progress", toStoppedProgress(jobId, lastProgress));
-}
-
-function scanCompletion(
-  jobId: string,
-  sourceId: string,
-  results: readonly { errors: readonly unknown[] }[]
-): { jobId: string; sourceId: string; succeeded: boolean; completedAt: string } {
-  return {
-    jobId,
-    sourceId,
-    succeeded: results.every((result) => result.errors.length === 0),
-    completedAt: new Date().toISOString()
-  };
-}
-
-function recentScanCompletion<T extends { completedAt: string }>(completion: T | null): T | null {
-  if (!completion) return null;
-  return Date.now() - Date.parse(completion.completedAt) <= 60_000 ? completion : null;
-}
-
-function resolveAgentSourceScanProcessUrl(): URL {
-  const extension = import.meta.url.endsWith(".ts") ? "ts" : "js";
-  return new URL(`../../../../services/agent-source-scan-process.${extension}`, import.meta.url);
-}
-
-function createScanProcessEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return process.versions.electron
-    ? { ...env, ELECTRON_RUN_AS_NODE: "1" }
-    : env;
+function isConflict(error: unknown): boolean {
+  return error instanceof MemoryLayerError && error.code === "conflict";
 }

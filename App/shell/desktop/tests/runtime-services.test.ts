@@ -243,10 +243,10 @@ describe("packaged desktop runtime config", () => {
       expect(children[0]?.name).toBe("memory");
       expect(children[0]?.persistOnDesktopExit).toBe(true);
       expect(children[0]?.process.pid).toBeTypeOf("number");
-      // The App backend still schedules scans; a second scheduler in the
-      // service would reread the same Agent histories on its own watermarks.
+      // Scanning belongs to the memory service now, scheduling included: Desktop
+      // proxies its scan routes instead of running a second scanner.
       expect(JSON.parse(await readFile(runtimeConfig.configPath + ".argv.json", "utf8")))
-        .toContain("--no-agent-source-automation");
+        .not.toContain("--no-agent-source-automation");
     } finally {
       await stopManagedChildrenForDesktopExit(children, true);
     }

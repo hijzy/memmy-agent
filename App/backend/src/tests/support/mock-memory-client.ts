@@ -1,6 +1,12 @@
 /** Mock memory client tests. */
 import { randomUUID } from "node:crypto";
-import type { MemoryHealthSnapshot, MemoryKind } from "@memmy/local-api-contracts";
+import {
+  MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH,
+  type AgentSourceView,
+  type MemoryAgentSourceScanStatus,
+  type MemoryHealthSnapshot,
+  type MemoryKind
+} from "@memmy/local-api-contracts";
 import { MemoryLayerError } from "../../adapters/outbound/memory-client/errors.js";
 import type { MemoryClient } from "../../adapters/outbound/memory-client/types.js";
 
@@ -11,6 +17,8 @@ export interface CreateMockMemoryClientOptions {
   now?: () => string;
   /** Failure rate. */
   failureRate?: number;
+  /** Agent sources the memory service reports as detected. */
+  agentSources?: readonly AgentSourceView[];
 }
 
 /** Creates create mock memory client. */
@@ -20,6 +28,16 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
   const failureRate = options.failureRate ?? 0;
   let changeSeqCounter = 0;
   let agentAccess = { autoScanKnownAgents: true, watchFileChanges: true, autoInjectSkill: false };
+  let scan = emptyScanStatus();
+  const agentSources = new Map<string, AgentSourceView>(
+    (options.agentSources ?? []).map((source) => [source.sourceId, source])
+  );
+
+  const requireAgentSource = (sourceId: string): AgentSourceView => {
+    const source = agentSources.get(sourceId);
+    if (!source) throw new MemoryLayerError("not_found", 404, `Unknown Agent source: ${sourceId}`);
+    return source;
+  };
 
   const nextChange = () => {
     changeSeqCounter += 1;
@@ -315,7 +333,185 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
         offset,
         serverTime: now()
       };
+    },
+
+    async listAgentSources() {
+      failIfNeeded();
+      return { executorAvailable: true, sources: [...agentSources.values()] };
+    },
+
+    async startAgentSourceScan(input) {
+      failIfNeeded();
+      if (scan.running) {
+        throw new MemoryLayerError("conflict", 409, "An Agent source scan is already running");
+      }
+      scan = {
+        ...scan,
+        running: true,
+        jobId: `mock-scan-${randomUUID()}`,
+        sourceId: input.sourceId,
+        mode: input.mode ?? null,
+        origin: input.origin,
+        progress: { sourceId: input.sourceId, phase: "scan", current: 0, total: 0 },
+        startedAt: now(),
+        completedAt: null,
+        error: null,
+        sources: []
+      };
+      return { accepted: true, jobId: scan.jobId as string };
+    },
+
+    async agentSourceScanStatus() {
+      failIfNeeded();
+      return scan;
+    },
+
+    async agentSourceScanResults() {
+      failIfNeeded();
+      return { items: [], nextCursor: null };
+    },
+
+    async pauseAgentSourceScan() {
+      failIfNeeded();
+      scan = { ...scan, running: false, progress: scan.progress ? { ...scan.progress, phase: "stopped" } : null };
+      return { ok: true };
+    },
+
+    async cancelAgentSourceScan() {
+      failIfNeeded();
+      scan = emptyScanStatus();
+      return { ok: true };
+    },
+
+    async mutateAgentSourceConnection(input) {
+      failIfNeeded();
+      const source = requireAgentSource(input.sourceId);
+      const status = input.method === "DELETE"
+        ? "not_connected"
+        : input.kind === "plugin" ? "plugin_installed" : "skill_installed";
+      agentSources.set(input.sourceId, { ...source, status });
+      return { ok: true, sourceId: input.sourceId, status };
+    },
+
+    async detectAgentSourcePluginConflicts() {
+      failIfNeeded();
+      return { conflicts: [] };
+    },
+
+    async addManualAgentSource(input) {
+      failIfNeeded();
+      const sourceId = randomUUID();
+      const view = {
+        sourceId,
+        displayName: input.displayName,
+        dataPath: MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH,
+        builtin: false,
+        available: true,
+        status: "not_connected" as const,
+        messageCount: 0,
+        lastScannedAt: null,
+        syncBoundaryAt: null,
+        syncReady: false
+      };
+      agentSources.set(sourceId, view);
+      return view;
+    },
+
+    async updateManualAgentSource(sourceId, input) {
+      failIfNeeded();
+      const source = requireAgentSource(sourceId);
+      const view = {
+        ...source,
+        ...(input.dataPath ? { dataPath: input.dataPath } : {}),
+        ...(input.syncRecipe ? { syncReady: true } : {}),
+        ...(input.skillInstalled === undefined
+          ? {}
+          : { status: input.skillInstalled ? "skill_installed" as const : "not_connected" as const })
+      };
+      agentSources.set(sourceId, view);
+      return view;
+    },
+
+    async removeManualAgentSource(sourceId) {
+      failIfNeeded();
+      requireAgentSource(sourceId);
+      agentSources.delete(sourceId);
+      return { ok: true };
+    },
+
+    async importManualAgentSource(sourceId, input) {
+      failIfNeeded();
+      const source = requireAgentSource(sourceId);
+      const syncBoundaryAt = input.syncBoundaryAt ?? source.syncBoundaryAt ?? null;
+      agentSources.set(sourceId, {
+        ...source,
+        messageCount: source.messageCount + input.messages.length,
+        lastScannedAt: now(),
+        syncBoundaryAt
+      });
+      return {
+        sourceId,
+        attempted: input.messages.length,
+        written: input.messages.length,
+        deduped: 0,
+        failed: 0,
+        memoryIds: input.messages.map(() => randomUUID()),
+        syncBoundaryAt,
+        errors: []
+      };
+    },
+
+    async syncManualAgentSource(sourceId) {
+      failIfNeeded();
+      const source = requireAgentSource(sourceId);
+      return {
+        sourceId,
+        attempted: 0,
+        written: 0,
+        deduped: 0,
+        failed: 0,
+        memoryIds: [],
+        syncBoundaryAt: source.syncBoundaryAt ?? null,
+        errors: []
+      };
     }
+  };
+}
+
+/** Builds a detected Agent the way the memory service reports one. */
+export function mockAgentSourceView(
+  sourceId: string,
+  displayName: string,
+  overrides: Partial<AgentSourceView> = {}
+): AgentSourceView {
+  return {
+    sourceId,
+    displayName,
+    dataPath: `/home/user/.${sourceId}`,
+    builtin: true,
+    available: true,
+    status: "not_connected",
+    messageCount: 0,
+    lastScannedAt: null,
+    syncBoundaryAt: null,
+    syncReady: false,
+    ...overrides
+  };
+}
+
+function emptyScanStatus(): MemoryAgentSourceScanStatus {
+  return {
+    running: false,
+    jobId: null,
+    sourceId: null,
+    mode: null,
+    origin: null,
+    progress: null,
+    startedAt: null,
+    completedAt: null,
+    error: null,
+    sources: [],
+    pendingAdditions: null
   };
 }
 

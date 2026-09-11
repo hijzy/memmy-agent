@@ -1,5 +1,6 @@
 /** App actions module. */
 import type {
+  AgentSourceScanOrigin,
   AgentSourceView,
   AppBootstrapResponse,
   AppSettingsDto,
@@ -41,6 +42,7 @@ export interface AgentSourceScanProgress {
   current: number;
   total: number;
   message?: string;
+  origin?: AgentSourceScanOrigin;
 }
 
 export interface AgentSourceScanCompletion {
@@ -50,6 +52,17 @@ export interface AgentSourceScanCompletion {
 
 export interface AgentSourceScanFinished extends AgentSourceScanCompletion {
   succeeded: boolean;
+  origin?: AgentSourceScanOrigin;
+}
+
+/**
+ * Scans run in the memory service, which also scans on its own schedule and for
+ * the Viewer. This window reports progress for its own runs only; a run it did
+ * not start shows up as the Agent list refreshing underneath. A missing origin
+ * comes from a service too old to report one, and is treated as ours.
+ */
+export function startedInThisApp(origin?: AgentSourceScanOrigin): boolean {
+  return origin === undefined || origin === "app";
 }
 
 export const AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS = 5_000;

@@ -1,23 +1,26 @@
 /** Agent sources route tests. */
-import { randomUUID } from "node:crypto";
-import { MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH } from "@memmy/local-api-contracts";
+import { MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH, type MemoryAgentSourceScanStatus } from "@memmy/local-api-contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import { createProgressBus, type ProgressBus } from "../../../../services/progress-bus.js";
+import { MemoryLayerError } from "../../../outbound/memory-client/errors.js";
+import { createAgentSourceScanRelay, type AgentSourceScanRelay } from "../../../../services/agent-source-scan-relay.js";
+import { createProgressBus } from "../../../../services/progress-bus.js";
 import { createLocalApiServer } from "../server.js";
 import type { FastifyInstance } from "fastify";
 import type { PermissionManager } from "../../../../permission/index.js";
-import type { AgentSourceService, CollectedSourceScan } from "../../../../services/agent-source-service.js";
 import type { BackendServices } from "../../../../services/index.js";
 
 let app: FastifyInstance | undefined;
+let relay: AgentSourceScanRelay | undefined;
 
 afterEach(async () => {
+  await relay?.stop();
+  relay = undefined;
   await app?.close();
   app = undefined;
 });
 
 describe("agent sources local api routes", () => {
-  it("lists agent sources with runtime token authentication", async () => {
+  it("lists the Agent sources the memory service reports", async () => {
     const { server } = createServer();
     app = server;
 
@@ -29,29 +32,18 @@ describe("agent sources local api routes", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual([
-      expect.objectContaining({
-        sourceId: "cursor",
-        status: "not_connected"
-      })
+      expect.objectContaining({ sourceId: "cursor", status: "not_connected" })
     ]);
   });
 
   it("returns detected memory plugin conflicts", async () => {
-    const { server } = createServer({
-      agentSources: {
-        ...createFakeAgentSourceService(),
-        async detectMemoryPluginConflicts() {
-          return [
-            {
-              sourceId: "openclaw",
-              displayName: "OpenClaw",
-              configPath: "/tmp/openclaw/openclaw.json",
-              installedPluginId: "memory-core"
-            }
-          ];
-        }
-      }
-    });
+    const { server, memoryClient } = createServer();
+    memoryClient.conflicts = [{
+      sourceId: "openclaw",
+      displayName: "OpenClaw",
+      configPath: "/tmp/openclaw/openclaw.json",
+      installedPluginId: "memory-core"
+    }];
     app = server;
 
     const response = await server.inject({
@@ -62,14 +54,12 @@ describe("agent sources local api routes", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
-      conflicts: [
-        {
-          sourceId: "openclaw",
-          displayName: "OpenClaw",
-          configPath: "/tmp/openclaw/openclaw.json",
-          installedPluginId: "memory-core"
-        }
-      ]
+      conflicts: [{
+        sourceId: "openclaw",
+        displayName: "OpenClaw",
+        configPath: "/tmp/openclaw/openclaw.json",
+        installedPluginId: "memory-core"
+      }]
     });
   });
 
@@ -107,49 +97,14 @@ describe("agent sources local api routes", () => {
   });
 
   it("adds, removes, installs plugin, installs skill, and uninstalls agent sources", async () => {
-    const calls: string[] = [];
-    const { server } = createServer({
-      agentSources: {
-        ...createFakeAgentSourceService(),
-        async addManual(input) {
-          calls.push(`add:${input.displayName}`);
-          return {
-            sourceId: "manual-1",
-            displayName: input.displayName,
-            dataPath: MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH,
-            builtin: false,
-            available: true,
-            status: "not_connected",
-            messageCount: 0,
-            lastScannedAt: null
-          };
-        },
-        async remove(sourceId) {
-          calls.push(`remove:${sourceId}`);
-        },
-        async installSkill(sourceId) {
-          calls.push(`install:${sourceId}`);
-        },
-        async uninstallSkill(sourceId) {
-          calls.push(`uninstall:${sourceId}`);
-        },
-        async installPlugin(sourceId) {
-          calls.push(`plugin:${sourceId}`);
-        },
-        async uninstallPlugin(sourceId) {
-          calls.push(`unplugin:${sourceId}`);
-        }
-      }
-    });
+    const { server, memoryClient } = createServer();
     app = server;
 
     const addResponse = await server.inject({
       method: "POST",
       url: "/api/agent-sources/manual",
       headers: { "x-memmy-local-token": "test-token" },
-      payload: {
-        displayName: "Manual Agent"
-      }
+      payload: { displayName: "Manual Agent" }
     });
     const removeResponse = await server.inject({
       method: "DELETE",
@@ -164,7 +119,8 @@ describe("agent sources local api routes", () => {
     const installPluginResponse = await server.inject({
       method: "POST",
       url: "/api/agent-sources/openclaw/plugin",
-      headers: { "x-memmy-local-token": "test-token" }
+      headers: { "x-memmy-local-token": "test-token" },
+      payload: { installType: "onboarding" }
     });
     const uninstallPluginResponse = await server.inject({
       method: "DELETE",
@@ -178,61 +134,24 @@ describe("agent sources local api routes", () => {
     });
 
     expect(addResponse.statusCode).toBe(200);
+    expect(addResponse.json()).toMatchObject({ sourceId: "manual-1", displayName: "Manual Agent" });
     expect(removeResponse.json()).toEqual({ ok: true });
     expect(installResponse.json()).toEqual({ ok: true });
     expect(installPluginResponse.json()).toEqual({ ok: true });
     expect(uninstallPluginResponse.json()).toEqual({ ok: true });
     expect(uninstallResponse.json()).toEqual({ ok: true });
-    expect(calls).toEqual(["add:Manual Agent", "remove:manual-1", "install:cursor", "plugin:openclaw", "unplugin:openclaw", "uninstall:cursor"]);
+    expect(memoryClient.calls.filter((call) => !call.startsWith("list"))).toEqual([
+      "addManual:Manual Agent",
+      "removeManual:manual-1",
+      "connect:cursor:skill:POST",
+      "connect:openclaw:plugin:POST",
+      "connect:openclaw:plugin:DELETE",
+      "connect:cursor:skill:DELETE"
+    ]);
   });
 
   it("accepts AI-normalized history batches and managed Skill status updates", async () => {
-    const calls: string[] = [];
-    const { server } = createServer({
-      agentSources: {
-        ...createFakeAgentSourceService(),
-        async importManaged(sourceId, input) {
-          calls.push(`import:${sourceId}:${input.mode}:${input.messages.length}:${input.final}`);
-          return {
-            sourceId,
-            attempted: input.messages.length,
-            written: input.messages.length,
-            deduped: 0,
-            failed: 0,
-            memoryIds: ["memory-1"],
-            syncBoundaryAt: input.syncBoundaryAt ?? null,
-            errors: []
-          };
-        },
-        async syncManaged(sourceId) {
-          calls.push(`sync:${sourceId}`);
-          return {
-            sourceId,
-            attempted: 2,
-            written: 1,
-            deduped: 1,
-            failed: 0,
-            memoryIds: ["memory-2"],
-            syncBoundaryAt: "2026-07-01T10:00:00.000Z",
-            errors: []
-          };
-        },
-        async updateManaged(sourceId, input) {
-          calls.push(`update:${sourceId}:${input.skillInstalled}`);
-          return {
-            sourceId,
-            displayName: "Aider",
-            dataPath: input.dataPath ?? "/tmp/aider",
-            builtin: false,
-            available: true,
-            status: input.skillInstalled ? "skill_installed" : "not_connected",
-            messageCount: 2,
-            lastScannedAt: null,
-            syncBoundaryAt: null
-          };
-        }
-      }
-    });
+    const { server, memoryClient } = createServer();
     app = server;
 
     const importResponse = await server.inject({
@@ -241,15 +160,13 @@ describe("agent sources local api routes", () => {
       headers: { "x-memmy-local-token": "test-token" },
       payload: {
         mode: "initial_subset",
-        messages: [
-          {
-            messageId: "message-1",
-            conversationId: "conversation-1",
-            role: "user",
-            content: "question",
-            createdAt: "2026-07-01T10:00:00.000Z"
-          }
-        ],
+        messages: [{
+          messageId: "message-1",
+          conversationId: "conversation-1",
+          role: "user",
+          content: "question",
+          createdAt: "2026-07-01T10:00:00.000Z"
+        }],
         syncBoundaryAt: "2026-07-01T10:00:00.000Z",
         final: true
       }
@@ -258,10 +175,7 @@ describe("agent sources local api routes", () => {
       method: "PATCH",
       url: "/api/agent-sources/manual-1/managed",
       headers: { "x-memmy-local-token": "test-token" },
-      payload: {
-        dataPath: "/tmp/aider",
-        skillInstalled: true
-      }
+      payload: { dataPath: "/tmp/aider", skillInstalled: true }
     });
     const syncResponse = await server.inject({
       method: "POST",
@@ -281,613 +195,267 @@ describe("agent sources local api routes", () => {
       status: "skill_installed",
       dataPath: "/tmp/aider"
     });
-    expect(syncResponse.json()).toMatchObject({
-      sourceId: "manual-1",
-      attempted: 2,
-      written: 1,
-      deduped: 1
-    });
-    expect(calls).toEqual([
-      "import:manual-1:initial_subset:1:true",
-      "update:manual-1:true",
-      "sync:manual-1"
+    expect(syncResponse.json()).toMatchObject({ sourceId: "manual-1", written: 0 });
+    expect(memoryClient.calls).toEqual([
+      "importManual:manual-1:initial_subset:1:true",
+      "updateManual:manual-1:true",
+      "syncManual:manual-1"
     ]);
   });
 
-  it("returns a structured user-actionable error when skill target is unavailable", async () => {
-    const { server } = createServer({
-      agentSources: {
-        ...createFakeAgentSourceService(),
-        async installSkill() {
-          throw Object.assign(new Error("Opencode is not installed or its directory is unavailable"), {
-            code: "agent_source_unavailable"
-          });
-        }
-      }
-    });
+  /** The Desktop UI turns this code and message into "install Cursor first". */
+  it("passes the memory service's unavailable-Agent error through unchanged", async () => {
+    const { server, memoryClient } = createServer();
+    memoryClient.connectionError = new MemoryLayerError(
+      "agent_source_unavailable",
+      409,
+      "Opencode is not installed or its directory is unavailable"
+    );
     app = server;
 
-    const response = await server.inject({
+    const skillResponse = await server.inject({
       method: "POST",
       url: "/api/agent-sources/opencode/skill",
       headers: { "x-memmy-local-token": "test-token", "x-request-id": "req-opencode-skill" }
     });
+    const pluginResponse = await server.inject({
+      method: "POST",
+      url: "/api/agent-sources/hermes/plugin",
+      headers: { "x-memmy-local-token": "test-token", "x-request-id": "req-hermes-plugin" }
+    });
 
-    expect(response.statusCode).toBe(409);
-    expect(response.json()).toEqual({
+    expect(skillResponse.statusCode).toBe(409);
+    expect(skillResponse.json()).toEqual({
       error: {
         code: "agent_source_unavailable",
         message: "Opencode is not installed or its directory is unavailable",
         requestId: "req-opencode-skill"
       }
     });
+    expect(pluginResponse.statusCode).toBe(409);
+    expect(pluginResponse.json()).toMatchObject({ error: { requestId: "req-hermes-plugin" } });
   });
 
-  it("returns a structured user-actionable error when plugin target is unavailable", async () => {
-    const { server } = createServer({
-      agentSources: {
-        ...createFakeAgentSourceService(),
-        async installPlugin() {
-          throw Object.assign(new Error("Hermes is not installed or its directory is unavailable"), {
-            code: "agent_source_unavailable"
-          });
-        }
-      }
-    });
-    app = server;
-
-    const response = await server.inject({
-      method: "POST",
-      url: "/api/agent-sources/hermes/plugin",
-      headers: { "x-memmy-local-token": "test-token", "x-request-id": "req-hermes-plugin" }
-    });
-
-    expect(response.statusCode).toBe(409);
-    expect(response.json()).toEqual({
-      error: {
-        code: "agent_source_unavailable",
-        message: "Hermes is not installed or its directory is unavailable",
-        requestId: "req-hermes-plugin"
-      }
-    });
-  });
-
-  it("starts scan jobs and forwards progress through SSE", async () => {
-    const progressBus = createProgressBus();
-    const { server } = createServer({ progressBus });
-    app = server;
-    await server.listen({ host: "127.0.0.1", port: 0 });
-    const baseUrl = `http://127.0.0.1:${(server.server.address() as { port: number }).port}`;
-
-    const controller = new AbortController();
-    const eventsResponse = await fetch(`${baseUrl}/api/events?token=test-token`, {
-      signal: controller.signal
-    });
-    const scanResponse = await fetch(`${baseUrl}/api/agent-sources/scan`, {
-      method: "POST",
-      headers: { "x-memmy-local-token": "test-token" }
-    });
-    const text = await readStreamUntil(eventsResponse, "agent_source.scan_completed");
-    controller.abort();
-
-    expect(scanResponse.status).toBe(200);
-    expect(await scanResponse.json()).toEqual({ jobId: expect.any(String) });
-    expect(text).toContain('"phase":"scan"');
-    expect(text).toContain("adapter read");
-    expect(text).toContain("event: agent_source.scan_progress");
-    expect(text).toContain("event: agent_source.scan_completed");
-  });
-
-  it("responds with the scan job before collecting sources", async () => {
-    const calls: string[] = [];
-    const { server } = createServer({
-      agentSources: {
-        ...createFakeAgentSourceService(),
-        async collectAll() {
-          calls.push("collectAll");
-          return [];
-        },
-        async ingestCollected() {
-          return [];
-        },
-        async processImportSummaries() {
-          return [];
-        }
-      }
-    });
-    app = server;
-
-    const response = await server.inject({
-      method: "POST",
-      url: "/api/agent-sources/scan",
-      headers: { "x-memmy-local-token": "test-token" }
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ jobId: expect.any(String) });
-    expect(calls).toEqual([]);
-
-    await new Promise((resolve) => setImmediate(resolve));
-    expect(calls).toEqual(["collectAll"]);
-  });
-
-  it.each([
-    "cursor",
-    "claude_code",
-    "codex",
-    "opencode",
-    "openclaw",
-    "hermes",
-    "deepseek_harness",
-    "workbuddy",
-    "pi",
-    "qwenwork"
-  ])("starts a source-scoped scan job for %s", async (sourceId) => {
-    const calls: string[] = [];
-    const { server } = createServer({
-      agentSources: {
-        ...createFakeAgentSourceService(),
-        async collectAll() {
-          calls.push("collectAll");
-          return [];
-        },
-        async collectOne(sourceId) {
-          calls.push(`collectOne:${sourceId}`);
-          return createCollectedFixture(1, sourceId);
-        },
-        async ingestCollected(collected) {
-          calls.push(`ingest:${collected.map((source) => source.sourceId).join(",")}`);
-          return collected.map(toScanResult);
-        },
-        async processImportSummaries(_memoryIds, options) {
-          calls.push(`summarize:${options?.progressSourceId ?? "all"}`);
-          return [];
-        }
-      }
-    });
+  it("hands out the job id the memory service generated", async () => {
+    const { server, memoryClient } = createServer();
     app = server;
 
     const response = await server.inject({
       method: "POST",
       url: "/api/agent-sources/scan",
       headers: { "x-memmy-local-token": "test-token" },
-      payload: { sourceId }
+      payload: { sourceId: "cursor", mode: "incremental" }
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ jobId: expect.any(String) });
-    expect(calls).toEqual([]);
-
-    await waitFor(() => calls.includes(`summarize:${sourceId}`));
-    expect(calls).toEqual([
-      `collectOne:${sourceId}`,
-      `ingest:${sourceId}`,
-      `summarize:${sourceId}`
-    ]);
+    expect(response.json()).toEqual({ jobId: "agent-scan-1" });
+    expect(memoryClient.calls).toContain("startScan:cursor:incremental:app");
   });
 
-  it("stops the active scan job", async () => {
-    let resolveStopped: () => void = () => undefined;
-    const stopped = new Promise<void>((resolve) => {
-      resolveStopped = resolve;
-    });
-    let collectCalls = 0;
-    const { server } = createServer({
-      agentSources: {
-        ...createFakeAgentSourceService(),
-        async collectAll(options) {
-          collectCalls += 1;
-          if (options?.signal?.aborted) {
-            resolveStopped();
-          } else {
-            options?.signal?.addEventListener("abort", () => resolveStopped(), { once: true });
-          }
-          await stopped;
-          return [];
-        },
-        async ingestCollected() {
-          return [];
-        },
-        async processImportSummaries() {
-          return [];
-        }
-      }
-    });
+  /** Pressing scan while a scan runs used to join the running job, and still does. */
+  it("joins the running scan instead of failing when one is already running", async () => {
+    const { server, memoryClient } = createServer();
+    memoryClient.status = runningStatus();
+    memoryClient.startScanError = new MemoryLayerError("conflict", 409, "An Agent source scan is already running");
     app = server;
 
-    const scanResponse = await server.inject({
+    const response = await server.inject({
       method: "POST",
       url: "/api/agent-sources/scan",
       headers: { "x-memmy-local-token": "test-token" }
     });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ jobId: "agent-scan-1" });
+  });
+
+  it("reports a conflict the running scan cannot explain", async () => {
+    const { server, memoryClient } = createServer();
+    memoryClient.startScanError = new MemoryLayerError(
+      "conflict",
+      409,
+      "Resume or stop the paused Agent source scan first"
+    );
+    app = server;
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/api/agent-sources/scan",
+      headers: { "x-memmy-local-token": "test-token" }
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({
+      error: { code: "conflict", message: "Resume or stop the paused Agent source scan first" }
+    });
+  });
+
+  it("forwards the memory service's scan progress and completion through SSE", async () => {
+    const { server, memoryClient } = createServer();
+    app = server;
+    await server.listen({ host: "127.0.0.1", port: 0 });
+    const baseUrl = `http://127.0.0.1:${(server.server.address() as { port: number }).port}`;
+
+    const controller = new AbortController();
+    const eventsResponse = await fetch(`${baseUrl}/api/events?token=test-token`, { signal: controller.signal });
+    const scanResponse = await fetch(`${baseUrl}/api/agent-sources/scan`, {
+      method: "POST",
+      headers: { "x-memmy-local-token": "test-token" }
+    });
+    await waitFor(() => memoryClient.calls.some((call) => call.startsWith("startScan")));
+    memoryClient.status = finishedStatus();
+    const text = await readStreamUntil(eventsResponse, "agent_source.scan_completed");
+    controller.abort();
+
+    expect(scanResponse.status).toBe(200);
+    expect(await scanResponse.json()).toEqual({ jobId: "agent-scan-1" });
+    expect(text).toContain("event: agent_source.scan_progress");
+    expect(text).toContain('"phase":"scan"');
+    expect(text).toContain('"origin":"app"');
+    expect(text).toContain("event: agent_source.scan_completed");
+    expect(text).toContain('"emittedMessages":4');
+  });
+
+  /**
+   * Progress events only say a scan is alive. A UI that reloads or reconnects
+   * asks for the status, and that answer has to come from the memory service.
+   */
+  it("returns active scan status for page reload recovery", async () => {
+    // Polling is parked so only the route itself can refresh the answer.
+    const { server, memoryClient } = createServer({ pollIntervalMs: 60_000 });
+    app = server;
+
+    const idleResponse = await server.inject({
+      method: "GET",
+      url: "/api/agent-sources/scan/status",
+      headers: { "x-memmy-local-token": "test-token" }
+    });
+    memoryClient.status = runningStatus();
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/agent-sources/scan/status",
+      headers: { "x-memmy-local-token": "test-token" }
+    });
+
+    expect(idleResponse.json()).toEqual({ active: false, progress: null, completion: null });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      active: true,
+      progress: {
+        jobId: "agent-scan-1",
+        sourceId: "cursor",
+        phase: "add",
+        current: 2,
+        total: 5,
+        message: "Adding memories",
+        origin: "app"
+      },
+      completion: null
+    });
+  });
+
+  it("reports a paused scan as stopped so the UI can offer a resume", async () => {
+    const { server, memoryClient } = createServer();
+    app = server;
+
     const stopResponse = await server.inject({
       method: "POST",
       url: "/api/agent-sources/scan/stop",
       headers: { "x-memmy-local-token": "test-token" }
     });
-    const stoppedStatusResponse = await server.inject({
+    memoryClient.status = pausedStatus();
+    const statusResponse = await server.inject({
       method: "GET",
       url: "/api/agent-sources/scan/status",
       headers: { "x-memmy-local-token": "test-token" }
     });
-    await stopped;
-    const continueResponse = await server.inject({
-      method: "POST",
-      url: "/api/agent-sources/scan",
-      headers: { "x-memmy-local-token": "test-token" }
-    });
-    await new Promise((resolve) => setImmediate(resolve));
 
-    expect(scanResponse.statusCode).toBe(200);
     expect(stopResponse.json()).toEqual({ ok: true });
-    expect(stoppedStatusResponse.json()).toEqual({
+    expect(memoryClient.calls).toContain("pauseScan");
+    expect(statusResponse.json()).toMatchObject({
       active: false,
-      progress: expect.objectContaining({
-        jobId: scanResponse.json().jobId,
-        phase: "stopped"
-      })
+      progress: { jobId: "agent-scan-1", phase: "stopped", current: 2, total: 5 }
     });
-    expect(continueResponse.statusCode).toBe(200);
-    expect(continueResponse.json()).not.toEqual(scanResponse.json());
-    expect(collectCalls).toBe(2);
   });
 
-  it("cancels a paused full scan so a source-scoped scan can start", async () => {
-    let resolveCanceled: () => void = () => undefined;
-    const canceled = new Promise<void>((resolve) => {
-      resolveCanceled = resolve;
-    });
-    const calls: string[] = [];
-    const { server } = createServer({
-      agentSources: {
-        ...createFakeAgentSourceService(),
-        async collectAll(options) {
-          calls.push("collectAll");
-          if (options?.signal?.aborted) {
-            resolveCanceled();
-          } else {
-            options?.signal?.addEventListener("abort", () => resolveCanceled(), { once: true });
-          }
-          await canceled;
-          return [];
-        },
-        async collectOne(sourceId) {
-          calls.push(`collectOne:${sourceId}`);
-          return createCollectedFixture(1, sourceId);
-        },
-        async ingestCollected(collected) {
-          calls.push(`ingest:${collected.map((source) => source.sourceId).join(",")}`);
-          return collected.map(toScanResult);
-        },
-        async processImportSummaries() {
-          return [];
-        }
-      }
-    });
+  it("treats stopping an already finished scan as done", async () => {
+    const { server, memoryClient } = createServer();
+    memoryClient.pauseError = new MemoryLayerError("conflict", 409, "No Agent source scan is running");
     app = server;
 
-    const scanResponse = await server.inject({
+    const response = await server.inject({
       method: "POST",
-      url: "/api/agent-sources/scan",
+      url: "/api/agent-sources/scan/stop",
       headers: { "x-memmy-local-token": "test-token" }
     });
-    await waitFor(() => calls.includes("collectAll"));
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ok: true });
+  });
+
+  it("cancels the scan and forgets it", async () => {
+    const { server, memoryClient } = createServer();
+    memoryClient.status = runningStatus();
+    app = server;
+
+    const statusBefore = await server.inject({
+      method: "GET",
+      url: "/api/agent-sources/scan/status",
+      headers: { "x-memmy-local-token": "test-token" }
+    });
+    memoryClient.status = idleStatus();
     const cancelResponse = await server.inject({
       method: "POST",
       url: "/api/agent-sources/scan/cancel",
       headers: { "x-memmy-local-token": "test-token" }
     });
-    await canceled;
-    await new Promise((resolve) => setImmediate(resolve));
-    const statusResponse = await server.inject({
+    const statusAfter = await server.inject({
       method: "GET",
       url: "/api/agent-sources/scan/status",
       headers: { "x-memmy-local-token": "test-token" }
     });
-    const openclawResponse = await server.inject({
-      method: "POST",
-      url: "/api/agent-sources/scan",
-      headers: { "x-memmy-local-token": "test-token" },
-      payload: { sourceId: "openclaw" }
-    });
 
-    expect(scanResponse.statusCode).toBe(200);
+    expect(statusBefore.json()).toMatchObject({ active: true });
     expect(cancelResponse.json()).toEqual({ ok: true });
-    expect(statusResponse.json()).toEqual({ active: false, progress: null });
-    expect(openclawResponse.statusCode).toBe(200);
-    expect(openclawResponse.json()).not.toEqual(scanResponse.json());
-    await waitFor(() => calls.includes("collectOne:openclaw"));
-    expect(calls).toContain("ingest:openclaw");
+    expect(memoryClient.calls).toContain("cancelScan");
+    expect(statusAfter.json()).toEqual({ active: false, progress: null, completion: null });
   });
 
-  it("resumes a stopped add phase without collecting sources again", async () => {
-    let resolveFirstIngest: () => void = () => undefined;
-    const firstIngestStopped = new Promise<void>((resolve) => {
-      resolveFirstIngest = resolve;
-    });
-    let collectCalls = 0;
-    let ingestCalls = 0;
-    const { server } = createServer({
-      agentSources: {
-        ...createFakeAgentSourceService(),
-        async collectAll(options) {
-          collectCalls += 1;
-          options?.onProgress?.({
-            sourceId: "cursor",
-            phase: "scan",
-            current: 2,
-            total: 2,
-            message: "Source scan completed"
-          });
-          return [createCollectedFixture(2)];
-        },
-        async ingestCollected(collected, options) {
-          ingestCalls += 1;
-          options?.onProgress?.({
-            sourceId: "cursor",
-            phase: "add",
-            current: ingestCalls === 1 ? 1 : 2,
-            total: 2,
-            message: "Adding memories"
-          });
-          if (ingestCalls === 1) {
-            if (options?.signal?.aborted) {
-              resolveFirstIngest();
-            } else {
-              options?.signal?.addEventListener("abort", () => resolveFirstIngest(), { once: true });
-            }
-            await firstIngestStopped;
-            options?.signal?.throwIfAborted();
-          }
-          return collected.map(toScanResult);
-        },
-        async processImportSummaries() {
-          return [];
-        }
-      }
-    });
-    app = server;
-
-    const scanResponse = await server.inject({
-      method: "POST",
-      url: "/api/agent-sources/scan",
-      headers: { "x-memmy-local-token": "test-token" }
-    });
-    await waitFor(() => ingestCalls === 1);
-    const stopResponse = await server.inject({
-      method: "POST",
-      url: "/api/agent-sources/scan/stop",
-      headers: { "x-memmy-local-token": "test-token" }
-    });
-    await firstIngestStopped;
-    await new Promise((resolve) => setImmediate(resolve));
-    const continueResponse = await server.inject({
-      method: "POST",
-      url: "/api/agent-sources/scan",
-      headers: { "x-memmy-local-token": "test-token" }
-    });
-    await waitFor(() => ingestCalls === 2);
-    await new Promise((resolve) => setImmediate(resolve));
-
-    expect(stopResponse.json()).toEqual({ ok: true });
-    expect(continueResponse.statusCode).toBe(200);
-    expect(continueResponse.json()).toEqual(scanResponse.json());
-    expect(collectCalls).toBe(1);
-    expect(ingestCalls).toBe(2);
-  });
-
-  it("returns active scan status for page reload recovery", async () => {
-    let releaseScan: () => void = () => undefined;
-    const scanGate = new Promise<void>((resolve) => {
-      releaseScan = resolve;
-    });
-    const { server } = createServer({
-      agentSources: {
-        ...createFakeAgentSourceService(),
-        async collectAll() {
-          return [createCollectedFixture()];
-        },
-        async ingestCollected(_collected, options) {
-          options?.onProgress?.({
-            sourceId: "cursor",
-            phase: "add",
-            current: 2,
-            total: 5,
-            message: "Adding memories"
-          });
-          await scanGate;
-          return [];
-        },
-        async processImportSummaries() {
-          return [];
-        }
-      }
-    });
-    app = server;
-
-    const scanResponse = await server.inject({
-      method: "POST",
-      url: "/api/agent-sources/scan",
-      headers: { "x-memmy-local-token": "test-token" }
-    });
-    await new Promise((resolve) => setImmediate(resolve));
-    const statusResponse = await server.inject({
-      method: "GET",
-      url: "/api/agent-sources/scan/status",
-      headers: { "x-memmy-local-token": "test-token" }
-    });
-    releaseScan();
-    await new Promise((resolve) => setImmediate(resolve));
-
-    expect(statusResponse.statusCode).toBe(200);
-    expect(statusResponse.json()).toEqual({
-      active: true,
-      progress: {
-        jobId: scanResponse.json().jobId,
-        sourceId: "cursor",
-        phase: "add",
-        current: 2,
-        total: 5,
-        message: "Adding memories"
-      }
-    });
-  });
-
-  it("keeps stopped scan status when the aborted job emits stale progress", async () => {
-    let resolveStopped: () => void = () => undefined;
-    const stopped = new Promise<void>((resolve) => {
-      resolveStopped = resolve;
-    });
-    const { server } = createServer({
-      agentSources: {
-        ...createFakeAgentSourceService(),
-        async collectAll() {
-          return [createCollectedFixture()];
-        },
-        async ingestCollected(_collected, options) {
-          options?.onProgress?.({
-            sourceId: "cursor",
-            phase: "add",
-            current: 2,
-            total: 5,
-            message: "Adding memories"
-          });
-          options?.signal?.addEventListener("abort", () => {
-            options.onProgress?.({
-              sourceId: "cursor",
-              phase: "add",
-              current: 4,
-              total: 5,
-              message: "stale progress after stop"
-            });
-            resolveStopped();
-          }, { once: true });
-          await stopped;
-          return [];
-        },
-        async processImportSummaries() {
-          return [];
-        }
-      }
-    });
-    app = server;
-
-    const scanResponse = await server.inject({
-      method: "POST",
-      url: "/api/agent-sources/scan",
-      headers: { "x-memmy-local-token": "test-token" }
-    });
-    await new Promise((resolve) => setImmediate(resolve));
-    const stopResponse = await server.inject({
-      method: "POST",
-      url: "/api/agent-sources/scan/stop",
-      headers: { "x-memmy-local-token": "test-token" }
-    });
-    await stopped;
-    await new Promise((resolve) => setImmediate(resolve));
-    const statusResponse = await server.inject({
-      method: "GET",
-      url: "/api/agent-sources/scan/status",
-      headers: { "x-memmy-local-token": "test-token" }
-    });
-
-    expect(scanResponse.statusCode).toBe(200);
-    expect(stopResponse.json()).toEqual({ ok: true });
-    expect(statusResponse.json()).toEqual({
-      active: false,
-      progress: expect.objectContaining({
-        jobId: scanResponse.json().jobId,
-        sourceId: "cursor",
-        phase: "stopped",
-        current: 2,
-        total: 5
-      })
-    });
-  });
-
-  it("throttles high-frequency scan progress events before forwarding to SSE", async () => {
-    const progressBus = createProgressBus();
-    const { server } = createServer({
-      progressBus,
-      agentSources: {
-        ...createFakeAgentSourceService(),
-        async collectAll(options) {
-          for (let index = 1; index <= 120; index += 1) {
-            options?.onProgress?.({
-              sourceId: "cursor",
-              phase: index % 2 === 0 ? "emit" : "redact",
-              current: index,
-              total: 120
-            });
-          }
-          return [createCollectedFixture(120)];
-        },
-        async ingestCollected(collected) {
-          return collected.map(toScanResult);
-        },
-        async processImportSummaries() {
-          return [];
-        }
-      }
-    });
-    app = server;
-    await server.listen({ host: "127.0.0.1", port: 0 });
-    const baseUrl = `http://127.0.0.1:${(server.server.address() as { port: number }).port}`;
-
-    const controller = new AbortController();
-    const eventsResponse = await fetch(`${baseUrl}/api/events?token=test-token`, {
-      signal: controller.signal
-    });
-    await fetch(`${baseUrl}/api/agent-sources/scan`, {
-      method: "POST",
-      headers: { "x-memmy-local-token": "test-token" }
-    });
-    const text = await readStreamUntil(eventsResponse, "agent_source.scan_completed");
-    controller.abort();
-
-    const progressEvents = text.match(/event: agent_source\.scan_progress/g) ?? [];
-    expect(progressEvents.length).toBeLessThan(10);
-    expect(text).toContain('"current":101');
-  });
-
-  it("rejects scan jobs when onboarding scan permission is denied", async () => {
-    const { server } = createServer({
-      permissionManager: {
-        ...createFakePermissionManager(),
-        async canScanAgentSource() {
-          return false;
-        }
-      }
-    });
+  it("serves a scan job's per-conversation results from the memory service", async () => {
+    const { server, memoryClient } = createServer();
     app = server;
 
     const response = await server.inject({
-      method: "POST",
-      url: "/api/agent-sources/scan",
+      method: "GET",
+      url: "/api/agent-sources/scan/jobs/agent-scan-1/results?cursor=10&limit=900",
       headers: { "x-memmy-local-token": "test-token" }
     });
 
-    expect(response.statusCode).toBe(403);
+    expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
-      error: {
-        code: "scan_not_permitted",
-        message: "scan not permitted"
-      }
+      items: [{ sourceId: "cursor", conversationId: "conversation-1", memoryId: "memory-1" }],
+      nextCursor: null
     });
+    expect(memoryClient.calls).toContain("scanResults:agent-scan-1:10:500");
   });
 });
 
 function createServer(
   overrides: {
-    agentSources?: AgentSourceService;
     agentSourceAutoInject?: BackendServices["agentSourceAutoInject"];
-    progressBus?: ProgressBus;
     permissionManager?: PermissionManager;
+    pollIntervalMs?: number;
   } = {}
-): {
-  server: FastifyInstance;
-} {
-  const progressBus = overrides.progressBus ?? createProgressBus();
+): { server: FastifyInstance; memoryClient: FakeMemoryAgentSourceClient } {
+  const progressBus = createProgressBus();
+  const memoryClient = createFakeMemoryClient();
+  relay = createAgentSourceScanRelay({
+    memoryClient,
+    progressBus,
+    activePollIntervalMs: overrides.pollIntervalMs ?? 5,
+    idlePollIntervalMs: overrides.pollIntervalMs ?? 10
+  });
+  relay.start();
   const services = {
     agentAdapterRegistry: {
       listAdapters: () => []
@@ -897,7 +465,17 @@ function createServer(
         throw new Error("bootstrap not used in this test");
       }
     },
-    agentSources: overrides.agentSources ?? createFakeAgentSourceService(),
+    memoryClient,
+    agentSourceConnections: {
+      list: async () => (await memoryClient.listAgentSources()).sources,
+      connect: async (sourceId: string, kind: "plugin" | "skill") => {
+        await memoryClient.mutateAgentSourceConnection({ sourceId, kind, method: "POST" });
+      },
+      disconnect: async (sourceId: string, kind: "plugin" | "skill") => {
+        await memoryClient.mutateAgentSourceConnection({ sourceId, kind, method: "DELETE" });
+      }
+    },
+    agentSourceScanRelay: relay,
     agentSourceAutoInject: overrides.agentSourceAutoInject ?? {
       async runOnce() {
         return {
@@ -917,89 +495,160 @@ function createServer(
       permissionManager: overrides.permissionManager ?? createFakePermissionManager(),
       services,
       heartbeatIntervalMs: 20
-    })
+    }),
+    memoryClient
   };
 }
 
-function createFakeAgentSourceService(): AgentSourceService {
-  async function collectAll(options?: Parameters<AgentSourceService["collectAll"]>[0]) {
-    options?.onProgress?.({
-      sourceId: "cursor",
-      phase: "read",
-      current: 1,
-      total: 1,
-      message: "adapter read"
-    });
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    return [createCollectedFixture()];
-  }
+interface FakeMemoryAgentSourceClient {
+  calls: string[];
+  status: MemoryAgentSourceScanStatus;
+  conflicts: Array<{ sourceId: string; displayName: string; configPath: string; installedPluginId: string }>;
+  startScanError?: MemoryLayerError;
+  pauseError?: MemoryLayerError;
+  connectionError?: MemoryLayerError;
+  listAgentSources: () => Promise<{ executorAvailable: true; sources: Array<Record<string, unknown>> }>;
+  mutateAgentSourceConnection: (input: { sourceId: string; kind: "plugin" | "skill"; method: "POST" | "DELETE" }) => Promise<unknown>;
+  [method: string]: unknown;
+}
 
-  async function ingestCollected(collected: readonly CollectedSourceScan[]) {
-    return collected.map(toScanResult);
-  }
+function createFakeMemoryClient(): FakeMemoryAgentSourceClient {
+  const client = {
+    calls: [] as string[],
+    status: idleStatus(),
+    conflicts: [] as Array<{ sourceId: string; displayName: string; configPath: string; installedPluginId: string }>,
+    startScanError: undefined as MemoryLayerError | undefined,
+    pauseError: undefined as MemoryLayerError | undefined,
+    connectionError: undefined as MemoryLayerError | undefined,
 
-  async function processImportSummaries() {
-    return [];
-  }
-
-  return {
-    async list() {
-      return [
-        {
+    async listAgentSources() {
+      client.calls.push("list");
+      return {
+        executorAvailable: true as const,
+        sources: [{
           sourceId: "cursor",
           displayName: "Cursor",
           dataPath: "/tmp/cursor",
           builtin: true,
           available: true,
-          status: "not_connected",
+          status: "not_connected" as const,
           messageCount: 0,
-          lastScannedAt: null
-        }
-      ];
+          lastScannedAt: null,
+          syncBoundaryAt: null,
+          syncReady: false
+        }]
+      };
     },
-    async scanAll(options) {
-      const collected = await collectAll(options);
-      const results = await ingestCollected(collected);
-      await processImportSummaries();
-      return results;
-    },
-    collectAll,
-    async collectOne(sourceId, options) {
-      return collectAll(options).then(() => createCollectedFixture(1, sourceId));
-    },
-    ingestCollected,
-    processImportSummaries,
-    async scanOne(sourceId) {
-      return toScanResult({
-        ...createCollectedFixture(),
-        sourceId
+
+    async startAgentSourceScan(input: { sourceId: string; mode?: string; origin: string }) {
+      client.calls.push(`startScan:${input.sourceId}:${input.mode ?? "auto"}:${input.origin}`);
+      if (client.startScanError) throw client.startScanError;
+      client.status = runningStatus({
+        sourceId: "cursor",
+        phase: "scan",
+        current: 0,
+        total: 4,
+        message: "Scanning Agent history"
       });
+      return { accepted: true as const, jobId: "agent-scan-1" };
     },
-    async addManual(input) {
+
+    async agentSourceScanStatus() {
+      return client.status;
+    },
+
+    async agentSourceScanResults(input: { jobId: string; cursor?: string; limit?: number }) {
+      client.calls.push(`scanResults:${input.jobId}:${input.cursor ?? "0"}:${input.limit ?? 100}`);
       return {
-        sourceId: randomUUID(),
+        items: [{ sourceId: "cursor", conversationId: "conversation-1", memoryId: "memory-1" }],
+        nextCursor: null
+      };
+    },
+
+    async pauseAgentSourceScan() {
+      client.calls.push("pauseScan");
+      if (client.pauseError) throw client.pauseError;
+      return { ok: true as const };
+    },
+
+    async cancelAgentSourceScan() {
+      client.calls.push("cancelScan");
+      client.status = idleStatus();
+      return { ok: true as const };
+    },
+
+    async mutateAgentSourceConnection(input: { sourceId: string; kind: "plugin" | "skill"; method: "POST" | "DELETE" }) {
+      client.calls.push(`connect:${input.sourceId}:${input.kind}:${input.method}`);
+      if (client.connectionError) throw client.connectionError;
+      return {
+        ok: true as const,
+        sourceId: input.sourceId,
+        status: input.method === "DELETE"
+          ? ("not_connected" as const)
+          : input.kind === "plugin" ? ("plugin_installed" as const) : ("skill_installed" as const)
+      };
+    },
+
+    async detectAgentSourcePluginConflicts() {
+      return { conflicts: client.conflicts };
+    },
+
+    async addManualAgentSource(input: { displayName: string }) {
+      client.calls.push(`addManual:${input.displayName}`);
+      return {
+        sourceId: "manual-1",
         displayName: input.displayName,
         dataPath: MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH,
         builtin: false,
         available: true,
-        status: "not_connected",
+        status: "not_connected" as const,
         messageCount: 0,
-        lastScannedAt: null
+        lastScannedAt: null,
+        syncBoundaryAt: null,
+        syncReady: false
       };
     },
-    async importManaged(sourceId, input) {
+
+    async updateManualAgentSource(sourceId: string, input: { dataPath?: string; skillInstalled?: boolean }) {
+      client.calls.push(`updateManual:${sourceId}:${input.skillInstalled}`);
+      return {
+        sourceId,
+        displayName: "Aider",
+        dataPath: input.dataPath ?? MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH,
+        builtin: false,
+        available: true,
+        status: input.skillInstalled ? ("skill_installed" as const) : ("not_connected" as const),
+        messageCount: 2,
+        lastScannedAt: null,
+        syncBoundaryAt: null,
+        syncReady: true
+      };
+    },
+
+    async removeManualAgentSource(sourceId: string) {
+      client.calls.push(`removeManual:${sourceId}`);
+      return { ok: true as const };
+    },
+
+    async importManualAgentSource(
+      sourceId: string,
+      input: { mode: string; messages: readonly unknown[]; final?: boolean; syncBoundaryAt?: string }
+    ) {
+      client.calls.push(`importManual:${sourceId}:${input.mode}:${input.messages.length}:${input.final}`);
       return {
         sourceId,
         attempted: input.messages.length,
         written: input.messages.length,
         deduped: 0,
         failed: 0,
-        memoryIds: [],
+        memoryIds: ["memory-1"],
         syncBoundaryAt: input.syncBoundaryAt ?? null,
         errors: []
       };
     },
-    async syncManaged(sourceId) {
+
+    async syncManualAgentSource(sourceId: string) {
+      client.calls.push(`syncManual:${sourceId}`);
       return {
         sourceId,
         attempted: 0,
@@ -1010,68 +659,69 @@ function createFakeAgentSourceService(): AgentSourceService {
         syncBoundaryAt: null,
         errors: []
       };
-    },
-    async updateManaged(sourceId, input) {
-      return {
-        sourceId,
-        displayName: "Manual Agent",
-        dataPath: input.dataPath ?? MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH,
-        builtin: false,
-        available: true,
-        status: input.skillInstalled ? "skill_installed" : "not_connected",
-        messageCount: 0,
-        lastScannedAt: null,
-        syncBoundaryAt: null
-      };
-    },
-    async remove() {
-      return undefined;
-    },
-    async installSkill() {
-      return undefined;
-    },
-    async uninstallSkill() {
-      return undefined;
-    },
-    async installPlugin() {
-      return undefined;
-    },
-    async uninstallPlugin() {
-      return undefined;
-    },
-    async detectMemoryPluginConflicts() {
-      return [];
     }
   };
+
+  return client as unknown as FakeMemoryAgentSourceClient;
 }
 
-function createCollectedFixture(messageCount = 1, sourceId = "cursor"): CollectedSourceScan {
-  const conversationId = `${sourceId}-conversation-1`;
+function idleStatus(): MemoryAgentSourceScanStatus {
   return {
-    sourceId,
-    conversationIds: messageCount > 0 ? [conversationId] : [],
-    messages: Array.from({ length: messageCount }, (_, index) => ({
-      messageId: `${sourceId}-message-${index + 1}`,
-      sourceId,
-      conversationId,
-      role: "user",
-      content: `message ${index + 1}`,
-      createdAt: "2026-06-01T00:00:00.000Z",
-      workspacePath: null,
-      gitRoot: null,
-      rawMeta: {}
-    })),
-    errors: []
+    running: false,
+    jobId: null,
+    sourceId: null,
+    mode: null,
+    origin: null,
+    progress: null,
+    startedAt: null,
+    completedAt: null,
+    error: null,
+    sources: [],
+    pendingAdditions: null
   };
 }
 
-function toScanResult(collected: CollectedSourceScan) {
+function runningStatus(
+  progress: MemoryAgentSourceScanStatus["progress"] = {
+    sourceId: "cursor",
+    phase: "add",
+    current: 2,
+    total: 5,
+    message: "Adding memories"
+  }
+): MemoryAgentSourceScanStatus {
   return {
-    sourceId: collected.sourceId,
-    discoveredConversations: collected.conversationIds.length,
-    emittedMessages: collected.messages.length,
-    skipped: 0,
-    errors: collected.errors
+    ...idleStatus(),
+    running: true,
+    jobId: "agent-scan-1",
+    sourceId: "all",
+    mode: "incremental",
+    origin: "app",
+    progress,
+    startedAt: "2026-09-11T10:00:00.000Z"
+  };
+}
+
+function pausedStatus(): MemoryAgentSourceScanStatus {
+  return {
+    ...runningStatus({ sourceId: "cursor", phase: "stopped", current: 2, total: 5, message: "Agent source scan paused" }),
+    running: false
+  };
+}
+
+function finishedStatus(): MemoryAgentSourceScanStatus {
+  return {
+    ...runningStatus({ sourceId: "cursor", phase: "done", current: 4, total: 4 }),
+    running: false,
+    completedAt: "2026-09-11T10:00:30.000Z",
+    sources: [{
+      sourceId: "cursor",
+      discoveredConversations: 1,
+      emittedMessages: 4,
+      written: 2,
+      skipped: 0,
+      errorCount: 0
+    }]
   };
 }
 

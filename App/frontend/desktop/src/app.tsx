@@ -47,6 +47,7 @@ import {
   agentActions,
   appActions,
   createAgentOperationError,
+  startedInThisApp,
   type AppAction
 } from "./state/app-actions.js";
 import type { AgentState } from "./state/agent-chat-slice.js";
@@ -146,7 +147,7 @@ function RuntimeApp() {
           return;
         }
         if (status.completion) {
-          trackAgentSourceScanOutcome(status.completion);
+          if (startedInThisApp(status.completion.origin)) trackAgentSourceScanOutcome(status.completion);
           dispatch(appActions.agentSourceScanCompleted(status.completion));
           scheduleScanCompletionExpiry(status.completion.jobId);
           return;
@@ -225,7 +226,7 @@ function RuntimeApp() {
         if (scanStatus.progress) {
           dispatch(appActions.agentSourceScanProgressReceived(scanStatus.progress));
         } else if (scanStatus.completion) {
-          trackAgentSourceScanOutcome(scanStatus.completion);
+          if (startedInThisApp(scanStatus.completion.origin)) trackAgentSourceScanOutcome(scanStatus.completion);
           dispatch(appActions.agentSourceScanCompleted(scanStatus.completion));
           scheduleScanCompletionExpiry(scanStatus.completion.jobId);
         }
@@ -264,28 +265,34 @@ function RuntimeApp() {
           if (parsed?.type !== "agent_source.scan_completed") {
             return;
           }
-          const { jobId, sourceId, results: scanResults } = parsed.payload;
+          const { jobId, sourceId, origin, results: scanResults } = parsed.payload;
           const scanSucceeded = scanResults.every((result) => result.errors.length === 0);
-          trackAgentSourceScanOutcome({ jobId, sourceId, succeeded: scanSucceeded });
+          const ours = startedInThisApp(origin);
+          if (ours) trackAgentSourceScanOutcome({ jobId, sourceId, succeeded: scanSucceeded });
           clearMemoryPanelCache();
-          dispatch(appActions.agentSourceScanCompleted({ jobId, sourceId, succeeded: scanSucceeded }));
-          scheduleScanCompletionExpiry(jobId);
+          dispatch(appActions.agentSourceScanCompleted({ jobId, sourceId, succeeded: scanSucceeded, origin }));
+          if (ours) scheduleScanCompletionExpiry(jobId);
           void clients.agentSources
             .listSources()
             .then((nextSources) => {
-              dispatch(appActions.agentSourcesLoaded(nextSources));
-              const scanError = scanResults
+              // A scan started elsewhere still wrote memories, so the Agent list
+              // has to catch up without disturbing anything the user is doing.
+              dispatch(ours
+                ? appActions.agentSourcesLoaded(nextSources)
+                : appActions.agentSourcesRefreshed(nextSources));
+              const scanError = ours && scanResults
                 ? formatScanCompletedError(scanResults, nextSources, translationRef.current)
                 : null;
               if (scanError) {
                 dispatch(appActions.agentSourcesFailed(scanError));
               }
             })
-            .catch((error) =>
+            .catch((error) => {
+              if (!ours) return;
               dispatch(appActions.agentSourcesFailed(
                 formatAgentSourceScanRequestError(error, undefined, translationRef.current)
-              ))
-            );
+              ));
+            });
         });
         events.onerror = () => dispatch(appActions.eventStatusChanged("reconnecting"));
       } catch (error) {

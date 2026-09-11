@@ -535,7 +535,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         await waitWhilePaused(signal);
         signal.throwIfAborted();
         if (await adapter.detect()) available.push(adapter);
-        else if (request.sourceId !== "all") throw new MemoryServiceError("not_found", `${adapter.descriptor.displayName} is not installed`);
+        else if (request.sourceId !== "all") throw unavailableSourceError(adapter.descriptor.displayName);
       }
       const globalInitial = request.sourceId === "all" && available.length > 0 &&
         (request.mode === "initial_subset" || (request.mode === undefined && available.every((adapter) => !state.sources[adapter.descriptor.sourceId]?.lastScannedAt)));
@@ -775,13 +775,13 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   ): Promise<unknown> {
     const adapter = registry.require(sourceId);
     if (!(await adapter.detect())) {
-      throw new MemoryServiceError("not_found", `${adapter.descriptor.displayName} is not installed`);
+      throw unavailableSourceError(adapter.descriptor.displayName);
     }
     const target = integrationRegistry.get(sourceId);
     if (!target) throw new MemoryServiceError("invalid_argument", `Agent source ${sourceId} cannot be connected automatically`);
     if (method === "POST") {
       if (!(await target.resolveRootDirectory())) {
-        throw new MemoryServiceError("not_found", `${adapter.descriptor.displayName} is not installed`);
+        throw unavailableSourceError(adapter.descriptor.displayName);
       }
       if (kind === "plugin") {
         if (!target.installPlugin) {
@@ -1620,6 +1620,14 @@ function normalizeScanInput(value: unknown): {
     ? input.origin
     : "viewer";
   return { sourceId, origin, ...(mode ? { mode } : {}) };
+}
+
+/**
+ * Memmy Desktop keys its "install this Agent first" message off this code and
+ * this wording, so both have to survive the trip through its proxy routes.
+ */
+function unavailableSourceError(displayName: string): MemoryServiceError {
+  return new MemoryServiceError("agent_source_unavailable", `${displayName} is not installed or its directory is unavailable`);
 }
 
 function emptyScanState(): AgentSourceScanState {

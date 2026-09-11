@@ -37,7 +37,20 @@ describe("HttpMemoryClient", () => {
       "/api/v1/panel/analysis",
       "/api/v1/panel/items",
       "/api/v1/panel/tasks",
-      "/api/v1/panel/tasks/:id"
+      "/api/v1/panel/tasks/:id",
+      "/api/v1/agent-sources",
+      "/api/v1/agent-sources/scan",
+      "/api/v1/agent-sources/scan/status",
+      "/api/v1/agent-sources/scan/jobs/:jobId/results",
+      "/api/v1/agent-sources/scan/stop",
+      "/api/v1/agent-sources/scan/cancel",
+      "/api/v1/agent-sources/plugin-conflicts",
+      "/api/v1/agent-sources/manual",
+      "/api/v1/agent-sources/:id/plugin",
+      "/api/v1/agent-sources/:id/skill",
+      "/api/v1/agent-sources/:id",
+      "/api/v1/agent-sources/:id/import",
+      "/api/v1/agent-sources/:id/sync"
     ]);
     expect(
       buildMemoryLayerUrl("http://127.0.0.1:8765/", "closeSession", {
@@ -116,6 +129,27 @@ describe("HttpMemoryClient", () => {
     await expect(client.panelItems(panelItemsInput(), { userId: "account-user-1" })).resolves.toMatchObject({ items: [] });
     await expect(client.panelTasks({ page: 1 })).resolves.toMatchObject({ tasks: [] });
     await expect(client.deletePanelTask("episode-1")).resolves.toMatchObject({ ok: true, id: "episode-1" });
+    await expect(client.listAgentSources()).resolves.toMatchObject({ executorAvailable: true });
+    await expect(client.startAgentSourceScan({ sourceId: "all", mode: "incremental", origin: "app" }))
+      .resolves.toEqual({ accepted: true, jobId: "agent-scan-1" });
+    await expect(client.agentSourceScanStatus()).resolves.toMatchObject({ running: true, origin: "app" });
+    await expect(client.agentSourceScanResults({ jobId: "agent-scan-1", cursor: "0", limit: 100 }))
+      .resolves.toEqual({ items: [], nextCursor: null });
+    await expect(client.pauseAgentSourceScan()).resolves.toEqual({ ok: true });
+    await expect(client.cancelAgentSourceScan()).resolves.toEqual({ ok: true });
+    await expect(client.detectAgentSourcePluginConflicts()).resolves.toEqual({ conflicts: [] });
+    await expect(client.mutateAgentSourceConnection({ sourceId: "cursor", kind: "plugin", method: "POST" }))
+      .resolves.toMatchObject({ status: "plugin_installed" });
+    await expect(client.mutateAgentSourceConnection({ sourceId: "cursor", kind: "skill", method: "DELETE" }))
+      .resolves.toMatchObject({ status: "not_connected" });
+    await expect(client.addManualAgentSource({ displayName: "Internal Agent" }))
+      .resolves.toMatchObject({ sourceId: "manual-1" });
+    await expect(client.updateManualAgentSource("manual-1", { dataPath: "/opt/internal" }))
+      .resolves.toMatchObject({ dataPath: "/opt/internal" });
+    await expect(client.importManualAgentSource("manual-1", { mode: "initial_subset", messages: [], final: true }))
+      .resolves.toMatchObject({ written: 0 });
+    await expect(client.syncManualAgentSource("manual-1")).resolves.toMatchObject({ written: 0 });
+    await expect(client.removeManualAgentSource("manual-1")).resolves.toEqual({ ok: true });
 
     expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
       "GET /api/v1/health",
@@ -138,7 +172,21 @@ describe("HttpMemoryClient", () => {
       "GET /api/v1/panel/analysis",
       "GET /api/v1/panel/items",
       "GET /api/v1/panel/tasks",
-      "DELETE /api/v1/panel/tasks/episode-1"
+      "DELETE /api/v1/panel/tasks/episode-1",
+      "GET /api/v1/agent-sources",
+      "POST /api/v1/agent-sources/scan",
+      "GET /api/v1/agent-sources/scan/status",
+      "GET /api/v1/agent-sources/scan/jobs/agent-scan-1/results",
+      "POST /api/v1/agent-sources/scan/stop",
+      "POST /api/v1/agent-sources/scan/cancel",
+      "GET /api/v1/agent-sources/plugin-conflicts",
+      "POST /api/v1/agent-sources/cursor/plugin",
+      "DELETE /api/v1/agent-sources/cursor/skill",
+      "POST /api/v1/agent-sources/manual",
+      "PATCH /api/v1/agent-sources/manual-1",
+      "POST /api/v1/agent-sources/manual-1/import",
+      "POST /api/v1/agent-sources/manual-1/sync",
+      "DELETE /api/v1/agent-sources/manual-1"
     ]);
     expect(requests.every((request) => request.authorization === "Bearer memory-token")).toBe(true);
     expect(requests.find((request) => request.path === "/api/v1/panel/overview")?.timeZone)
@@ -162,13 +210,32 @@ describe("HttpMemoryClient", () => {
     expect(requests.find((request) => request.path === "/api/v1/admin/reload-config")?.body).toEqual({
       reason: "profile_switched"
     });
-    // The config route sits behind the memory service's local Viewer API,
-    // whose CSRF guard rejects writes without the marker header.
+    // The config and Agent source routes sit behind the memory service's local
+    // Viewer API, whose CSRF guard rejects writes without the marker header and
+    // whose reads do not need it.
     expect(requests.find((request) => request.path === "/api/v1/config")).toMatchObject({
       viewerMarker: "1",
       body: { config: { agentAccess: { autoScanKnownAgents: false } } }
     });
-    expect(requests.filter((request) => request.path !== "/api/v1/config").every((request) => request.viewerMarker === undefined)).toBe(true);
+    expect(
+      requests
+        .filter((request) => request.viewerMarker === "1")
+        .map((request) => `${request.method} ${request.path}`)
+    ).toEqual([
+      "PATCH /api/v1/config",
+      "POST /api/v1/agent-sources/scan",
+      "POST /api/v1/agent-sources/scan/stop",
+      "POST /api/v1/agent-sources/scan/cancel",
+      "POST /api/v1/agent-sources/cursor/plugin",
+      "DELETE /api/v1/agent-sources/cursor/skill",
+      "POST /api/v1/agent-sources/manual",
+      "PATCH /api/v1/agent-sources/manual-1",
+      "POST /api/v1/agent-sources/manual-1/import",
+      "POST /api/v1/agent-sources/manual-1/sync",
+      "DELETE /api/v1/agent-sources/manual-1"
+    ]);
+    expect(requests.find((request) => request.path === "/api/v1/agent-sources/scan")?.body)
+      .toEqual({ sourceId: "all", mode: "incremental", origin: "app" });
     expect(requests.find((request) => request.path === "/api/v1/memory/add")?.body).toMatchObject({
       content: "remember this",
       source: "codex"
@@ -488,8 +555,75 @@ function fixtureFor(method: string, path: string, body: unknown): unknown {
   if (method === "DELETE" && path === "/api/v1/panel/tasks/episode-1") {
     return { ok: true, id: "episode-1", deletedMemoryIds: [], serverTime: now() };
   }
+  if (path.startsWith("/api/v1/agent-sources")) return agentSourceFixtureFor(method, path);
 
   throw new Error(`unexpected route ${method} ${path}`);
+}
+
+function agentSourceFixtureFor(method: string, path: string): unknown {
+  if (method === "GET" && path === "/api/v1/agent-sources") {
+    return { executorAvailable: true, sources: [agentSourceView("cursor", "Cursor")] };
+  }
+  if (method === "POST" && path === "/api/v1/agent-sources/scan") return { accepted: true, jobId: "agent-scan-1" };
+  if (method === "GET" && path === "/api/v1/agent-sources/scan/status") {
+    return {
+      running: true,
+      jobId: "agent-scan-1",
+      sourceId: "all",
+      mode: "incremental",
+      origin: "app",
+      progress: { sourceId: "cursor", phase: "scan", current: 1, total: 4 },
+      startedAt: now(),
+      completedAt: null,
+      error: null,
+      sources: [],
+      pendingAdditions: null
+    };
+  }
+  if (method === "GET" && path === "/api/v1/agent-sources/scan/jobs/agent-scan-1/results") {
+    return { items: [], nextCursor: null };
+  }
+  if (method === "GET" && path === "/api/v1/agent-sources/plugin-conflicts") return { conflicts: [] };
+  if (method === "POST" && path === "/api/v1/agent-sources/cursor/plugin") {
+    return { ok: true, sourceId: "cursor", status: "plugin_installed" };
+  }
+  if (method === "DELETE" && path === "/api/v1/agent-sources/cursor/skill") {
+    return { ok: true, sourceId: "cursor", status: "not_connected" };
+  }
+  if (method === "POST" && path === "/api/v1/agent-sources/manual") {
+    return agentSourceView("manual-1", "Internal Agent");
+  }
+  if (method === "PATCH" && path === "/api/v1/agent-sources/manual-1") {
+    return { ...agentSourceView("manual-1", "Internal Agent"), dataPath: "/opt/internal" };
+  }
+  if (path === "/api/v1/agent-sources/manual-1/import" || path === "/api/v1/agent-sources/manual-1/sync") {
+    return {
+      sourceId: "manual-1",
+      attempted: 0,
+      written: 0,
+      deduped: 0,
+      failed: 0,
+      memoryIds: [],
+      syncBoundaryAt: null,
+      errors: []
+    };
+  }
+  return { ok: true };
+}
+
+function agentSourceView(sourceId: string, displayName: string) {
+  return {
+    sourceId,
+    displayName,
+    dataPath: `/home/user/.${sourceId}`,
+    builtin: sourceId === "cursor",
+    available: true,
+    status: "not_connected",
+    messageCount: 0,
+    lastScannedAt: null,
+    syncBoundaryAt: null,
+    syncReady: false
+  };
 }
 
 function healthOutput() {
