@@ -53,6 +53,33 @@ describe("memmy memory server entrypoint", () => {
     }
   });
 
+  it("schedules scans unless the launcher opts out", async () => {
+    const automationFor = async (extraArgs: string[]): Promise<boolean | undefined> => {
+      const root = mkdtempSync(join(tmpdir(), "memmy-memory-automation-"));
+      const configPath = join(root, "config.yaml");
+      const databasePath = join(root, "memory.sqlite");
+      writeFileSync(configPath, YAML.stringify({
+        memmyMemory: { storage: { mode: "local", backend: "sqlite", sqlitePath: databasePath } }
+      }));
+      const listen = vi.spyOn(memoryHttp, "listenMemoryHttpServer");
+      const running = main(["--config", configPath, "--host", "127.0.0.1", "--port", "0",
+        "--db", databasePath, ...extraArgs]);
+      try {
+        const endpoint = await waitForWrittenEndpoint(configPath);
+        await fetch(`${endpoint}/api/v1/admin/shutdown`, { method: "POST" });
+        await running;
+        return listen.mock.calls[0]?.[0].startAgentSourceAutomation;
+      } finally {
+        await running.catch(() => undefined);
+        vi.restoreAllMocks();
+        rmSync(root, { recursive: true, force: true });
+      }
+    };
+
+    expect(await automationFor([])).toBe(true);
+    expect(await automationFor(["--no-agent-source-automation"])).toBe(false);
+  });
+
   it("recognizes Windows packaged paths as direct server execution", () => {
     const entry = "C:\\Users\\tester\\AppData\\Local\\Programs\\Memmy\\resources\\app.asar\\dist\\runtime\\memory\\src\\server\\index.js";
 

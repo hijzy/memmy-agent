@@ -116,7 +116,7 @@ async function runMemoryService(argv: string[], lifecycle: {
                 ? { localServiceToken: config.storage.token }
                 : { allowAnonymous: true },
             configPath,
-            startAgentSourceAutomation: true
+            startAgentSourceAutomation: !options.noAgentSourceAutomation
         });
         server = listening.server;
         const { url } = listening;
@@ -162,6 +162,10 @@ Options:
   --sqlite-path <path>  Alias for --db
   --host <host>         Loopback listen address (default: 127.0.0.1)
   --port <port>         Listen port (default: 18960)
+  --no-agent-source-automation
+                        Serve the scan API but never schedule scans on a timer.
+                        Memmy Desktop passes this because it still runs its own
+                        scanner; a standalone service leaves it off.
   -h, --help            Show this help message
   --version             Show the service version
 `;
@@ -301,12 +305,14 @@ function parseServeArgs(argv: string[]): {
     dbPath?: string;
     host?: string;
     port?: number;
+    noAgentSourceAutomation?: boolean;
 } {
     const result: {
         configPath?: string;
         dbPath?: string;
         host?: string;
         port?: number;
+        noAgentSourceAutomation?: boolean;
     } = {};
 
     for (let index = 0; index < argv.length; index += 1) {
@@ -333,6 +339,8 @@ function parseServeArgs(argv: string[]): {
             index += 1;
         } else if (arg?.startsWith("--port=")) {
             result.port = parsePort(arg.slice("--port=".length));
+        } else if (arg === "--no-agent-source-automation") {
+            result.noAgentSourceAutomation = true;
         }
     }
 

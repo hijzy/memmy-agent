@@ -1120,7 +1120,11 @@ async function startManagedMemoryService(
     "--port",
     String(runtimeConfig.memoryListenPort),
     "--db",
-    runtimeConfig.memoryDatabasePath
+    runtimeConfig.memoryDatabasePath,
+    // The App backend still owns scheduled scanning. Two schedulers would read
+    // the same Agent histories against separate watermarks; drop this argument
+    // once scanning moves to the service for good.
+    "--no-agent-source-automation"
   ], {
     MEMMY_CONFIG: runtimeConfig.configPath,
     MEMMY_MEMORY_URL: runtimeConfig.memoryBaseUrl,

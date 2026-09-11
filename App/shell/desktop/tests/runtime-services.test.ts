@@ -162,6 +162,7 @@ describe("packaged desktop runtime config", () => {
       "const http = require('node:http');",
       "const args = process.argv.slice(2);",
       "const port = Number(args[args.indexOf('--port') + 1]);",
+      "require('node:fs').writeFileSync(args[args.indexOf('--config') + 1] + '.argv.json', JSON.stringify(args));",
       "const server = http.createServer((request, response) => {",
       "  if (request.url === '/api/v1/health') {",
       "    response.writeHead(200, { 'content-type': 'application/json' });",
@@ -242,6 +243,10 @@ describe("packaged desktop runtime config", () => {
       expect(children[0]?.name).toBe("memory");
       expect(children[0]?.persistOnDesktopExit).toBe(true);
       expect(children[0]?.process.pid).toBeTypeOf("number");
+      // The App backend still schedules scans; a second scheduler in the
+      // service would reread the same Agent histories on its own watermarks.
+      expect(JSON.parse(await readFile(runtimeConfig.configPath + ".argv.json", "utf8")))
+        .toContain("--no-agent-source-automation");
     } finally {
       await stopManagedChildrenForDesktopExit(children, true);
     }
