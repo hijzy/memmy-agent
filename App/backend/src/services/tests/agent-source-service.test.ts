@@ -175,6 +175,100 @@ describe("agent source service", () => {
     ]);
   });
 
+  it("skips unchanged Agent skills on a rescan and reimports them once the content changes", async () => {
+    const added: Parameters<MemoryClient["addMemory"]>[0][] = [];
+    const memoryClient = createMockMemoryClient();
+    const skill = {
+      sourceAgentId: "cursor",
+      sourceSkillId: ".system/review-code",
+      sourceSkillPath: "/tmp/cursor/skills/.system/review-code/SKILL.md",
+      sourceSkillVersion: "1",
+      sourceContentHash: "hash-v1",
+      title: "review-code",
+      content: "Review changed code.",
+      updatedAt: "2026-05-28T09:00:00.000Z"
+    };
+    let scanned = skill;
+    const service = createService({
+      repository: createRepository(),
+      adapters: [createFakeAdapter("cursor", createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z"))],
+      memoryClient: {
+        ...memoryClient,
+        async addMemory(input, context) {
+          added.push(input);
+          return memoryClient.addMemory(input, context);
+        }
+      },
+      skillDistributionService: {
+        async listSkills() {
+          return [scanned];
+        },
+        async install() {},
+        async uninstall() {},
+        async installPlugin() {},
+        async uninstallPlugin() {}
+      }
+    });
+
+    await service.scanOne("cursor");
+    expect(added.filter((input) => input.layer === "Skill")).toHaveLength(1);
+
+    // A Codex/Cursor upgrade rewrites the bundled skill byte for byte: the
+    // mtime moves but the content hash does not.
+    scanned = { ...skill, updatedAt: "2026-06-02T09:00:00.000Z" };
+    await service.scanOne("cursor");
+    expect(added.filter((input) => input.layer === "Skill")).toHaveLength(1);
+
+    scanned = { ...skill, sourceContentHash: "hash-v2", content: "Review changed code carefully." };
+    await service.scanOne("cursor");
+    expect(added.filter((input) => input.layer === "Skill")).toHaveLength(2);
+  });
+
+  it("retries an Agent skill whose import failed on the previous scan", async () => {
+    const memoryClient = createMockMemoryClient();
+    let attempts = 0;
+    const service = createService({
+      repository: createRepository(),
+      adapters: [createFakeAdapter("cursor", createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z"))],
+      memoryClient: {
+        ...memoryClient,
+        async addMemory(input, context) {
+          if (input.layer !== "Skill") return memoryClient.addMemory(input, context);
+          attempts += 1;
+          if (attempts === 1) throw new Error("memory layer unavailable");
+          return memoryClient.addMemory(input, context);
+        }
+      },
+      skillDistributionService: {
+        async listSkills() {
+          return [{
+            sourceAgentId: "cursor",
+            sourceSkillId: ".system/review-code",
+            sourceSkillPath: "/tmp/cursor/skills/.system/review-code/SKILL.md",
+            sourceSkillVersion: "1",
+            sourceContentHash: "hash-v1",
+            title: "review-code",
+            content: "Review changed code.",
+            updatedAt: "2026-05-28T09:00:00.000Z"
+          }];
+        },
+        async install() {},
+        async uninstall() {},
+        async installPlugin() {},
+        async uninstallPlugin() {}
+      }
+    });
+
+    const failed = await service.scanOne("cursor");
+    expect(failed.errors).toEqual([
+      { conversationId: "skill:.system/review-code", reason: "memory layer unavailable" }
+    ]);
+
+    const recovered = await service.scanOne("cursor");
+    expect(recovered.errors).toEqual([]);
+    expect(attempts).toBe(2);
+  });
+
   it("completes the scan and advances checkpoints when every memory is skipped", async () => {
     const repository = createRepository();
     const messages = createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z");

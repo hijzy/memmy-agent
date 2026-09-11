@@ -13,11 +13,40 @@ export function formatScanCompletedError(
   sources: readonly AgentSourceView[],
   t: AgentSourceScanErrorTranslator
 ): string | null {
-  const messages = results.flatMap((result) =>
-    result.errors.map((error) => formatScanError(result.sourceId, error.reason, sources, t))
-  );
+  const messages = results.flatMap((result) => formatScanResult(result, sources, t));
   const uniqueMessages = [...new Set(messages)];
   return uniqueMessages.length > 0 ? uniqueMessages.join("; ") : null;
+}
+
+/**
+ * A missing path or an unavailable source blocks the whole scan and needs the
+ * user to act, so it stays a failure. Anything else is a per-item failure: the
+ * memories that landed are kept and the scan watermark is held back so the rest
+ * are picked up next time, which is a retry notice rather than a failure.
+ */
+function formatScanResult(
+  result: ScanResult,
+  sources: readonly AgentSourceView[],
+  t: AgentSourceScanErrorTranslator
+): string[] {
+  const blocking = result.errors
+    .map((error) => formatBlockingScanError(result.sourceId, error.reason, sources, t))
+    .filter((message): message is string => message !== null);
+  if (blocking.length > 0 || result.errors.length === 0) {
+    return [...new Set(blocking)];
+  }
+
+  if (result.sourceId === "all") {
+    return [t("memory.scanFailed")];
+  }
+
+  const source = sources.find((candidate) => candidate.sourceId === result.sourceId);
+  const agent = source?.displayName ?? agentSourceDisplayName(result.sourceId);
+  const imported = result.memoryIdCount ?? result.memoryIds?.length ?? 0;
+  if (imported === 0) {
+    return [t("memory.scanSourceFailed", { agent })];
+  }
+  return [t("memory.scanSourcePartial", { agent, count: result.errorCount ?? result.errors.length })];
 }
 
 export function formatAgentSourceScanRequestError(
@@ -42,28 +71,27 @@ export function formatAgentSourceScanRequestError(
     : t("memory.scanFailed");
 }
 
-function formatScanError(
+function formatBlockingScanError(
   sourceId: string,
   reason: string,
   sources: readonly AgentSourceView[],
   t: AgentSourceScanErrorTranslator
-): string {
+): string | null {
   const missingPath = extractMissingScanPath(reason);
   if (missingPath) {
     return t("memory.scanPathNotFound", { path: missingPath });
   }
 
-  const source = sources.find((candidate) => candidate.sourceId === sourceId);
-  const agent = source?.displayName ?? agentSourceDisplayName(sourceId);
-  if (isSourceUnavailableReason(reason)) {
-    return source?.dataPath
-      ? t("memory.scanPathNotFound", { path: source.dataPath })
-      : t("memory.scanSourcePathNotFound", { agent });
+  if (!isSourceUnavailableReason(reason)) {
+    return null;
   }
 
-  return sourceId === "all"
-    ? t("memory.scanFailed")
-    : t("memory.scanSourceFailed", { agent });
+  const source = sources.find((candidate) => candidate.sourceId === sourceId);
+  return source?.dataPath
+    ? t("memory.scanPathNotFound", { path: source.dataPath })
+    : t("memory.scanSourcePathNotFound", {
+        agent: source?.displayName ?? agentSourceDisplayName(sourceId)
+      });
 }
 
 function extractMissingScanPath(reason: string): string | null {

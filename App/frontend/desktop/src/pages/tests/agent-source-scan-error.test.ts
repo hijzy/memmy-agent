@@ -72,6 +72,37 @@ describe("Agent source scan errors", () => {
     expect(enMessage).not.toContain("database disk image");
   });
 
+  it("reports a partly imported scan as pending retry instead of a failure", () => {
+    const results = [
+      partialScan("cursor", 12, ["SQLITE_BUSY: database is locked", "memory layer unavailable"])
+    ];
+
+    expect(formatScanCompletedError(results, [cursorSource], translator("zh-CN"))).toBe(
+      "扫描 Cursor 完成，2 项待重试。"
+    );
+    expect(formatScanCompletedError(results, [cursorSource], translator("en-US"))).toBe(
+      "Scanned Cursor. 2 item(s) will be retried."
+    );
+  });
+
+  it("counts the retryable items the backend truncated out of the error details", () => {
+    const results = [{ ...partialScan("cursor", 12, ["memory layer unavailable"]), errorCount: 1_400, detailsTruncated: true }];
+
+    expect(formatScanCompletedError(results, [cursorSource], translator("zh-CN"))).toBe(
+      "扫描 Cursor 完成，1400 项待重试。"
+    );
+  });
+
+  it("keeps an unreachable source a failure even when other items imported", () => {
+    const results = [
+      partialScan("cursor", 12, ["Cursor is not installed or its directory is unavailable"])
+    ];
+
+    expect(formatScanCompletedError(results, [cursorSource], translator("zh-CN"))).toBe(
+      "找不到路径：C:\\Users\\10970\\AppData\\Roaming\\Cursor\\User\\workspaceStorage"
+    );
+  });
+
   it("localizes scan request failures before they enter GUI state", () => {
     const error = new ApiRequestError(
       "Claude Code is not installed or its directory is unavailable",
@@ -101,6 +132,18 @@ function failedScan(sourceId: string, reason: string): ScanResult {
     emittedMessages: 0,
     skipped: 0,
     errors: [{ conversationId: "scan", reason }]
+  };
+}
+
+function partialScan(sourceId: string, imported: number, reasons: readonly string[]): ScanResult {
+  return {
+    sourceId,
+    discoveredConversations: imported + reasons.length,
+    emittedMessages: imported + reasons.length,
+    skipped: 0,
+    memoryIdCount: imported,
+    errorCount: reasons.length,
+    errors: reasons.map((reason, index) => ({ conversationId: `conv-${index}`, reason }))
   };
 }
 

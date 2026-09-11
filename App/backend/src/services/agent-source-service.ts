@@ -1160,6 +1160,12 @@ async function ingestSourceSkills(
 
   for (const skill of skills) {
     scanOptions.signal?.throwIfAborted();
+    // Skills carry volatile provenance (file mtime, absolute path) that is not
+    // part of their identity, so re-sending an unchanged skill on every scan
+    // only churns the memory. Content-hash dedup keeps the request out
+    // entirely; a failed import stays unmarked and is retried next scan.
+    const dedupKey = skillDedupKey(sourceId, skill.sourceSkillId, skill.sourceContentHash);
+    if (options.agentSourceRepository.hasSeen(dedupKey)) continue;
     try {
       const added = await options.memoryClient.addMemory({
         requestId: `agent-source-skill:${sourceId}:${skill.sourceSkillId}:${skill.sourceContentHash}`,
@@ -1178,6 +1184,7 @@ async function ingestSourceSkills(
         sourceContentHash: skill.sourceContentHash
       });
       memoryIdCount += 1;
+      options.agentSourceRepository.markSeen(dedupKey, sourceId);
       store?.saveResult({ sourceId, conversationId: `skill:${skill.sourceSkillId}`, memoryId: added.id });
     } catch (error) {
       errorCount += 1;
@@ -1190,6 +1197,10 @@ async function ingestSourceSkills(
     }
   }
   return { errors, errorCount, memoryIdCount };
+}
+
+function skillDedupKey(sourceId: string, sourceSkillId: string, contentHash: string): string {
+  return createHash("sha256").update(`${sourceId}::skill::${sourceSkillId}::${contentHash}`).digest("hex");
 }
 
 function filterCheckpointedConversations(
