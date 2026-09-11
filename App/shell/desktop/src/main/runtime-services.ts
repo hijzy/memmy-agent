@@ -1441,9 +1441,12 @@ export async function startAgentGatewayWithRecovery(
 
 function classifyAgentGatewayStartupIssue(error: unknown): AgentGatewayStartupIssue | null {
   const message = errorMessage(error);
-  return /failed to load config[\s\S]*\b(providers|modelPresets|modelAssignments|agents\.defaults)\b/i.test(message)
-    ? "model_config_invalid"
-    : null;
+  if (/failed to load config[\s\S]*\b(providers|modelPresets|modelAssignments|agents\.defaults)\b/i.test(message)) {
+    return "model_config_invalid";
+  }
+  // Any other rejected config section still keeps the gateway down, and the
+  // generic connection error tells the user nothing about where to look.
+  return /failed to load config/i.test(message) ? "config_invalid" : null;
 }
 
 export class AgentGatewaySupervisor {

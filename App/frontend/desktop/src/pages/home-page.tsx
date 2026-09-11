@@ -3471,9 +3471,13 @@ export function agentStatusText(
     return null;
   }
   if (status === "error") {
-    return t(context.startupIssue === "model_config_invalid" && !context.hasConnected
-      ? "home.modelSelector.unavailable"
-      : "home.agent.failed");
+    if (!context.hasConnected && context.startupIssue === "model_config_invalid") {
+      return t("home.modelSelector.unavailable");
+    }
+    if (!context.hasConnected && context.startupIssue === "config_invalid") {
+      return t("home.agent.configInvalid");
+    }
+    return t("home.agent.failed");
   }
   if (status === "reconnecting") {
     return t("home.agent.reconnecting");

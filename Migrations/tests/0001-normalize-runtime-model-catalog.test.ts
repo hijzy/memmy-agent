@@ -204,9 +204,29 @@ describe("v1.0.7/0001-normalize-runtime-model-catalog", () => {
     expect(config.modelAssignments.byok.embedding).toMatch(/^byok-openai-/);
     expect(config.modelAssignments.byok.asr).toMatch(/^byok-dashscope-/);
     expect(config.modelAssignments.byok.imageGeneration).toMatch(/^byok-dashscope-/);
-    expect(config.memmyMemory.summary).toBeUndefined();
-    expect(config.memmyMemory.evolution).toBeUndefined();
-    expect(config.memmyMemory.embedding).toBeUndefined();
+    // Lifting these into the catalog must not drop them: Memory still reads
+    // them for fixed role routing and for local/custom embedding.
+    expect(config.memmyMemory.summary).toEqual({
+      provider: "openai_compatible",
+      endpoint: "https://api.example/v1",
+      model: "gpt-4.1",
+      apiKey: "sk-agent",
+    });
+    expect(config.memmyMemory.evolution).toEqual({
+      provider: "anthropic",
+      endpoint: "https://anthropic.example",
+      model: "claude-4",
+      apiKey: "sk-claude",
+    });
+    expect(config.memmyMemory.embedding).toEqual({
+      mode: "custom",
+      custom: {
+        provider: "openai_compatible",
+        endpoint: "https://embedding.example/v1",
+        model: "text-embedding-3-small",
+        apiKey: "sk-embedding",
+      },
+    });
     expect(config.modelAssignments.account).toEqual({
       ownerAccountId: "account-a",
       agent: { candidates: ["account-preset"], default: "account-preset" },
@@ -537,9 +557,19 @@ describe("v1.0.7/0001-normalize-runtime-model-catalog", () => {
     });
     expect(config.memmyMemory.activeProfile).toBeUndefined();
     expect(config.memmyMemory.profiles).toBeUndefined();
-    expect(config.memmyMemory.summary).toBeUndefined();
-    expect(config.memmyMemory.evolution).toBeUndefined();
-    expect(config.memmyMemory.embedding).toBeUndefined();
+    expect(config.memmyMemory.summary).toEqual({
+      provider: "openai_compatible",
+      endpoint: "https://api.example.com/v1",
+      model: "gpt-main",
+      apiKey: "sk-agent",
+    });
+    expect(config.memmyMemory.evolution).toEqual({
+      provider: "anthropic",
+      endpoint: "https://anthropic.example",
+      model: "claude-fixed",
+      apiKey: "sk-evolution",
+    });
+    expect(config.memmyMemory.embedding).toEqual({ mode: "local", batchSize: 16 });
   });
 
   it("removes an invalid BYOK account projection without disturbing valid assignments", async () => {

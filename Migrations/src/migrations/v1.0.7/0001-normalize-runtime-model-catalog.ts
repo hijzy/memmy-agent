@@ -752,7 +752,10 @@ function liftLegacyRoots(config: JsonObject): void {
 export function removeLegacyRuntimeModelFields(config: RuntimeConfigDocument): void {
   const memmyMemory = objectAt(config, "memmyMemory");
   if (memmyMemory) {
-    for (const key of ["enable", "activeProfile", "profiles", "summary", "evolution", "embedding"]) {
+    // summary/evolution/embedding are not legacy: Memory reads them whenever
+    // roleRouting is "fixed" or the embedding mode is local/custom, and the
+    // catalog cannot express those. Only the profile shape is dead here.
+    for (const key of ["enable", "activeProfile", "profiles"]) {
       delete memmyMemory[key];
     }
   }

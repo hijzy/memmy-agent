@@ -1073,6 +1073,21 @@ describe("AgentGatewaySupervisor", () => {
     expect(supervisor.startRecovery).toHaveBeenCalledTimes(1);
   });
 
+  it("classifies a rejected non-model config section as a config contract failure", async () => {
+    const supervisor = {
+      ensureStarted: vi.fn(async () => {
+        throw new Error(
+          "agent-gateway exited before it became ready (code 1). stderr: memmy: Failed to load config from /Users/zephyr/.memmy/config.yaml: memmyMemory current contract does not accept legacy field 'embedding'"
+        );
+      }),
+      startRecovery: vi.fn()
+    };
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(startAgentGatewayWithRecovery(supervisor)).resolves.toBe("config_invalid");
+    expect(supervisor.startRecovery).toHaveBeenCalledTimes(1);
+  });
+
   it("restarts an owned gateway with bounded escalating delays and ignores old child callbacks", async () => {
     vi.useFakeTimers();
     const harness = createSupervisorHarness();

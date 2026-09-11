@@ -2,6 +2,7 @@ import { resolveMigrationTargets, runMigrations } from "@memmy/migrations";
 import fs from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { repairIncompatibleConfigFile } from "../../config/compatibility.js";
 import { getConfigPath, setConfigPath } from "../../config/loader.js";
 
 export const MIGRATIONS_READY_CONFIG_ENV = "MEMMY_MIGRATIONS_READY_CONFIG";
@@ -20,6 +21,7 @@ export interface StartupMigrationTarget {
 export interface StartupMigrationPreparation {
   target: StartupMigrationTarget;
   source: "executed" | "prepared-parent";
+  quarantinedConfigFields: string[];
 }
 
 type StartupMigrationInput = {
@@ -92,9 +94,14 @@ export async function prepareStartupMigrations(
   options: { force?: boolean } = {},
 ): Promise<StartupMigrationPreparation> {
   const target = resolveStartupMigrationTarget(input, env);
-  if (!options.force && preparedTargetMatches(target, env)) {
-    return { target, source: "prepared-parent" };
-  }
-  await runMigrations({ targets: target, logger: migrationLogger });
-  return { target, source: "executed" };
+  const prepared = !options.force && preparedTargetMatches(target, env);
+  if (!prepared) await runMigrations({ targets: target, logger: migrationLogger });
+  // Runs even behind a parent marker: the marker only covers registered
+  // migrations, and the Memory service rewrites config.yaml after they run.
+  const repair = repairIncompatibleConfigFile(target.runtimeConfigFile, migrationLogger);
+  return {
+    target,
+    source: prepared ? "prepared-parent" : "executed",
+    quarantinedConfigFields: (repair?.quarantined ?? []).map((field) => field.path.join(".")),
+  };
 }

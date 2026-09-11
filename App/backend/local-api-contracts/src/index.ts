@@ -224,7 +224,7 @@ export const ByokTokenUsageSummarySchema = z.object({
 });
 export type ByokTokenUsageSummary = z.infer<typeof ByokTokenUsageSummarySchema>;
 
-export const AgentGatewayStartupIssueSchema = z.enum(["model_config_invalid"]);
+export const AgentGatewayStartupIssueSchema = z.enum(["model_config_invalid", "config_invalid"]);
 export type AgentGatewayStartupIssue = z.infer<typeof AgentGatewayStartupIssueSchema>;
 
 export const AgentGatewayRuntimeConfigSchema = z.object({

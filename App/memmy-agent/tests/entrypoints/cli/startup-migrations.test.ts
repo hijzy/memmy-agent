@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { runMigrations } = vi.hoisted(() => ({
@@ -161,6 +162,31 @@ describe("startup migrations", () => {
 
     expect(result.source).toBe("prepared-parent");
     expect(runMigrations).not.toHaveBeenCalled();
+  });
+
+  it("repairs an incompatible config even behind a parent marker", async () => {
+    const root = tempRoot();
+    const configPath = path.join(root, "config.yaml");
+    const workspace = path.join(root, "workspace");
+    fs.mkdirSync(workspace);
+    // The Memory service rewrites config.yaml after the parent ran migrations,
+    // so the marker is no evidence that the file still matches this contract.
+    fs.writeFileSync(configPath, YAML.stringify({ memmyMemory: { activeProfile: "byok" } }), "utf8");
+    const env = {
+      ...migrationEnv(root),
+      [MIGRATIONS_READY_CONFIG_ENV]: configPath,
+      [MIGRATIONS_READY_WORKSPACE_ENV]: workspace,
+      [MIGRATIONS_READY_SESSION_DAG_ENV]: path.join(root, "session-dag"),
+    };
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const result = await prepareStartupMigrations({ config: configPath, workspace }, env);
+
+    expect(result.source).toBe("prepared-parent");
+    expect(runMigrations).not.toHaveBeenCalled();
+    expect(result.quarantinedConfigFields).toEqual(["memmyMemory.activeProfile"]);
+    expect(YAML.parse(fs.readFileSync(configPath, "utf8")).memmyMemory.activeProfile).toBeUndefined();
   });
 
   it("does not treat a standalone target as the prepared Desktop database target", async () => {

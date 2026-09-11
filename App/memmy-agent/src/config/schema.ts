@@ -560,11 +560,12 @@ export class ProviderConfig extends Base {
   endpoints: Dict<ModelEndpointConfig>;
 
   constructor(init: Dict = {}) {
-    for (const legacy of ["api_key", "api_base", "api_type", "extra_headers", "extra_body", "apiBase", "apiType"]) {
-      if (Object.prototype.hasOwnProperty.call(init, legacy)) {
-        throw new ValueError(`providers current contract does not accept legacy field '${legacy}'`);
-      }
-    }
+    rejectLegacyFields(
+      init,
+      [],
+      ["api_key", "api_base", "api_type", "extra_headers", "extra_body", "apiBase", "apiType"],
+      (field) => `providers current contract does not accept legacy field '${field}'`,
+    );
     super(init);
     this.apiKey = pick(init, ["apiKey"], null);
     this.extraHeaders = pick(init, ["extraHeaders"], null);
@@ -572,7 +573,9 @@ export class ProviderConfig extends Base {
     this.ownerAccountId = pick(init, ["ownerAccountId"], null);
     this.endpoints = Object.fromEntries(Object.entries(pick(init, ["endpoints"], {})).map(([id, value]) => [
       id,
-      value instanceof ModelEndpointConfig ? value : new ModelEndpointConfig(value as Dict),
+      value instanceof ModelEndpointConfig
+        ? value
+        : withConfigPath(["endpoints", id], () => new ModelEndpointConfig(value as Dict)),
     ]));
   }
 
@@ -614,11 +617,12 @@ export class ModelEndpointConfig extends Base {
   extraBody: Dict | null;
 
   constructor(init: Dict = {}) {
-    for (const legacy of ["api_key", "api_base", "api_type", "extra_headers", "extra_body"]) {
-      if (Object.prototype.hasOwnProperty.call(init, legacy)) {
-        throw new ValueError(`provider endpoint current contract does not accept legacy field '${legacy}'`);
-      }
-    }
+    rejectLegacyFields(
+      init,
+      [],
+      ["api_key", "api_base", "api_type", "extra_headers", "extra_body"],
+      (field) => `provider endpoint current contract does not accept legacy field '${field}'`,
+    );
     super(init);
     this.apiBase = assertRequiredString("provider endpoint apiBase", init.apiBase);
     this.protocol = assertOneOf("provider endpoint protocol", init.protocol, ENDPOINT_PROTOCOLS);
@@ -638,6 +642,46 @@ export class ModelEndpointConfig extends Base {
 }
 
 export class ValueError extends Error {}
+
+/**
+ * A field the current contract refuses whose value is either dead or already
+ * expressed elsewhere in the current shape, so removing it repairs the file.
+ * `path` lets startup repair quarantine exactly that field instead of forcing
+ * the whole config — and with it the process — to fail.
+ */
+export class LegacyConfigFieldError extends ValueError {
+  readonly path: readonly string[];
+
+  constructor(message: string, path: readonly string[]) {
+    super(message);
+    this.path = path;
+  }
+}
+
+function rejectLegacyFields(
+  init: Dict,
+  path: readonly string[],
+  legacyFields: readonly string[],
+  describe: (field: string) => string,
+): void {
+  for (const field of legacyFields) {
+    if (Object.prototype.hasOwnProperty.call(init, field)) {
+      throw new LegacyConfigFieldError(describe(field), [...path, field]);
+    }
+  }
+}
+
+/** Nested config objects cannot know their own key; the parent prepends it here. */
+function withConfigPath<T>(prefix: readonly string[], build: () => T): T {
+  try {
+    return build();
+  } catch (error) {
+    if (error instanceof LegacyConfigFieldError) {
+      throw new LegacyConfigFieldError(error.message, [...prefix, ...error.path]);
+    }
+    throw error;
+  }
+}
 
 export class BedrockProviderConfig extends ProviderConfig {
   region: string | null;
@@ -664,11 +708,13 @@ export class ProvidersConfig extends Base {
     for (const { name } of PROVIDERS) {
       const cls = name === "bedrock" ? BedrockProviderConfig : ProviderConfig;
       const raw = byNormalizedKey.get(name) ?? {};
-      this[name] = raw instanceof cls ? raw : new cls(raw);
+      this[name] = raw instanceof cls ? raw : withConfigPath(["providers", name], () => new cls(raw));
     }
     for (const [name, raw] of Object.entries(init)) {
       if (name in this) continue;
-      this[name] = raw instanceof ProviderConfig ? raw : new ProviderConfig(isRecord(raw) ? raw : {});
+      this[name] = raw instanceof ProviderConfig
+        ? raw
+        : withConfigPath(["providers", name], () => new ProviderConfig(isRecord(raw) ? raw : {}));
     }
   }
 
@@ -842,15 +888,16 @@ export class ImageGenerationToolConfig extends Base {
 
   constructor(init: Dict = {}) {
     super();
-    for (const legacy of [
-      "activeProfile", "active_profile", "profiles", "provider", "model", "apiKey", "api_key", "apiBase", "api_base",
-      "extraHeaders", "extra_headers", "extraBody", "extra_body", "default_aspect_ratio", "default_image_size",
-      "max_images_per_turn", "save_dir",
-    ]) {
-      if (Object.prototype.hasOwnProperty.call(init, legacy)) {
-        throw new ValueError(`tools.imageGeneration current contract does not accept legacy model field '${legacy}'`);
-      }
-    }
+    rejectLegacyFields(
+      init,
+      ["tools", "imageGeneration"],
+      [
+        "activeProfile", "active_profile", "profiles", "provider", "model", "apiKey", "api_key", "apiBase", "api_base",
+        "extraHeaders", "extra_headers", "extraBody", "extra_body", "default_aspect_ratio", "default_image_size",
+        "max_images_per_turn", "save_dir",
+      ],
+      (field) => `tools.imageGeneration current contract does not accept legacy model field '${field}'`,
+    );
     this.enabled = pick(init, ["enabled"], true);
     this.profileMode = false;
     this.defaultAspectRatio = pick(
@@ -1088,11 +1135,16 @@ export class MemmyMemoryConfig extends Base {
 
   constructor(init: Dict = {}, options: { userId?: string } = {}) {
     super();
-    for (const legacy of ["enable", "activeProfile", "profiles"]) {
-      if (Object.prototype.hasOwnProperty.call(init, legacy)) {
-        throw new ValueError(`memmyMemory current contract does not accept legacy field '${legacy}'`);
-      }
-    }
+    // Memory owns everything under memmyMemory except `enabled` and `userId`;
+    // the agent only carries the rest through. Reject solely the dead profile
+    // shape, which no current reader accepts, and leave unknown keys alone so
+    // a newer Memory release cannot take the agent down with it.
+    rejectLegacyFields(
+      init,
+      ["memmyMemory"],
+      ["enable", "activeProfile", "profiles"],
+      (field) => `memmyMemory current contract does not accept legacy field '${field}'`,
+    );
     this.additional = { ...init };
     for (const key of [
       "enabled", "userId", "version", "storage", "roleRouting", "retrievalLayers", "summary", "evolution",
@@ -1178,17 +1230,19 @@ export class Config extends Base {
 
   constructor(init: Dict = {}) {
     super();
-    for (const legacy of ["agent", "model", "uuid", "identity"]) {
-      if (Object.prototype.hasOwnProperty.call(init, legacy)) {
-        throw new ValueError(`config current contract does not accept legacy root '${legacy}'`);
-      }
-    }
+    rejectLegacyFields(
+      init,
+      [],
+      ["agent", "model", "uuid", "identity"],
+      (field) => `config current contract does not accept legacy root '${field}'`,
+    );
     const rawTools = isRecord(init.tools) ? init.tools : {};
-    for (const legacy of ["my", "myEnabled", "mySet"]) {
-      if (Object.prototype.hasOwnProperty.call(rawTools, legacy)) {
-        throw new ValueError(`config current contract does not accept legacy tools.${legacy}`);
-      }
-    }
+    rejectLegacyFields(
+      rawTools,
+      ["tools"],
+      ["my", "myEnabled", "mySet"],
+      (field) => `config current contract does not accept legacy tools.${field}`,
+    );
     const rawApp = pick<unknown>(init, ["app"], {});
     this.app =
       rawApp && typeof rawApp === "object" && !Array.isArray(rawApp) ? { ...(rawApp as Dict) } : {};

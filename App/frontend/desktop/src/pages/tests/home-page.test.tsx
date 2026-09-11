@@ -220,6 +220,13 @@ describe("HomePage", () => {
       startupIssue: "model_config_invalid",
       hasConnected: true
     })).toBe("home.agent.failed");
+    expect(agentStatusText("error", null, (key) => key, {
+      startupIssue: "config_invalid"
+    })).toBe("home.agent.configInvalid");
+    expect(agentStatusText("error", null, (key) => key, {
+      startupIssue: "config_invalid",
+      hasConnected: true
+    })).toBe("home.agent.failed");
   });
 
   it("shows the specific queue steer failure messages", () => {
