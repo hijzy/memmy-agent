@@ -1,36 +1,52 @@
 import { get_encoding } from "tiktoken";
 
-const OPENAI_EMBEDDING_INPUT_TOKEN_BUDGET = 7_500;
-const OPENAI_EMBEDDING_BATCH_TOKEN_BUDGET = 290_000;
+/**
+ * Per-input token budget for a single embedding chunk.
+ *
+ * Inputs are measured with cl100k_base, which is only a proxy for whatever
+ * tokenizer the serving model uses. CJK text and code routinely cost 10-20%
+ * more on a non-OpenAI vocabulary than cl100k predicts, so the budget sits well
+ * under the 8192-token input limit that embedding endpoints commonly enforce:
+ * the estimate can be that far wrong without the request being rejected.
+ */
+export const EMBEDDING_INPUT_TOKEN_BUDGET = 7_000;
+const EMBEDDING_BATCH_TOKEN_BUDGET = 290_000;
 
-export interface OpenAiEmbeddingChunk {
+export interface EmbeddingChunk {
   originalIndex: number;
   tokens: number[];
   input: string | number[];
 }
 
-export interface OpenAiEmbeddingPlan {
-  batches: OpenAiEmbeddingChunk[][];
-  chunks: OpenAiEmbeddingChunk[];
+export interface EmbeddingPlan {
+  batches: EmbeddingChunk[][];
+  chunks: EmbeddingChunk[];
   originalCount: number;
+}
+
+export interface EmbeddingPlanOptions {
+  model?: string;
+  maxInputTokens?: number;
+  /** Only OpenAI-shaped endpoints accept token-id arrays in place of text. */
+  tokenIdsSupported?: boolean;
 }
 
 let encoder: ReturnType<typeof get_encoding> | undefined;
 
-export function planOpenAiEmbeddingInputs(
+export function planEmbeddingInputs(
   texts: string[],
-  model?: string,
-  configuredMaxInputTokens?: number
-): OpenAiEmbeddingPlan | null {
-  const inputTokenBudget = resolveInputTokenBudget(model, configuredMaxInputTokens);
+  options: EmbeddingPlanOptions = {}
+): EmbeddingPlan | null {
+  const inputTokenBudget = resolveInputTokenBudget(options.maxInputTokens);
   // Explicit budgets retain the historical token-id request shape for
   // deployments that opt into it; opaque aliases use text chunks so their
   // model-specific tokenizer is still applied by the provider.
-  const useTokenIds = isKnownOpenAiEmbeddingModel(model) || configuredMaxInputTokens !== undefined;
+  const useTokenIds = options.tokenIdsSupported === true &&
+    (isKnownOpenAiEmbeddingModel(options.model) || options.maxInputTokens !== undefined);
   encoder ??= get_encoding("cl100k_base");
   const encoded = texts.map((text) => Array.from(encoder!.encode(text, [], [])));
   const totalTokens = encoded.reduce((sum, tokens) => sum + tokens.length, 0);
-  if (totalTokens <= OPENAI_EMBEDDING_BATCH_TOKEN_BUDGET &&
+  if (totalTokens <= EMBEDDING_BATCH_TOKEN_BUDGET &&
     encoded.every((tokens) => tokens.length <= inputTokenBudget)) return null;
 
   const chunks = encoded.flatMap((tokens, originalIndex) => {
@@ -38,7 +54,7 @@ export function planOpenAiEmbeddingInputs(
     const tokenBytes = useTokenIds
       ? undefined
       : tokens.map((token) => encoder!.decode_single_token_bytes(token));
-    const items: OpenAiEmbeddingChunk[] = [];
+    const items: EmbeddingChunk[] = [];
     for (let offset = 0; offset < tokens.length;) {
       let end = Math.min(tokens.length, offset + inputTokenBudget);
       if (!useTokenIds && end < tokens.length) {
@@ -64,9 +80,9 @@ export function planOpenAiEmbeddingInputs(
   };
 }
 
-export function aggregateOpenAiEmbeddingVectors(plan: OpenAiEmbeddingPlan, vectors: number[][]): number[][] {
+export function aggregateEmbeddingVectors(plan: EmbeddingPlan, vectors: number[][]): number[][] {
   if (vectors.length !== plan.chunks.length) {
-    throw new Error(`openai_compatible returned ${vectors.length} embeddings for ${plan.chunks.length} chunks`);
+    throw new Error(`embedding provider returned ${vectors.length} embeddings for ${plan.chunks.length} chunks`);
   }
   return Array.from({ length: plan.originalCount }, (_item, originalIndex) => {
     const entries = plan.chunks
@@ -75,7 +91,7 @@ export function aggregateOpenAiEmbeddingVectors(plan: OpenAiEmbeddingPlan, vecto
     if (entries.length === 1) return entries[0]!.vector;
     const dimensions = entries[0]?.vector.length ?? 0;
     if (dimensions === 0 || entries.some((entry) => entry.vector.length !== dimensions)) {
-      throw new Error("openai_compatible returned incompatible embedding dimensions for chunked input");
+      throw new Error("embedding provider returned incompatible embedding dimensions for chunked input");
     }
     const totalWeight = entries.reduce((sum, entry) => sum + Math.max(1, entry.chunk.tokens.length), 0);
     const mean = Array.from({ length: dimensions }, (_value, dimension) =>
@@ -87,11 +103,19 @@ export function aggregateOpenAiEmbeddingVectors(plan: OpenAiEmbeddingPlan, vecto
   });
 }
 
+/** Narrows planned inputs for providers whose request shape is text-only. */
+export function requireTextInput(input: string | number[]): string {
+  if (typeof input !== "string") {
+    throw new Error("embedding provider does not accept token-id input");
+  }
+  return input;
+}
+
 function isKnownOpenAiEmbeddingModel(model?: string): boolean {
   return /(?:^|[/.:])text-embedding-(?:3-(?:small|large)|ada-002)(?:$|[/.:])/i.test(model?.trim() ?? "");
 }
 
-function resolveInputTokenBudget(_model?: string, configured?: number): number {
+function resolveInputTokenBudget(configured?: number): number {
   const explicit = typeof configured === "number" && Number.isFinite(configured) && configured > 0
     ? Math.floor(configured)
     : undefined;
@@ -100,7 +124,7 @@ function resolveInputTokenBudget(_model?: string, configured?: number): number {
   // alias has a larger context window, so apply the same conservative budget
   // used for known OpenAI embedding models unless the caller opts into a
   // smaller budget explicitly.
-  return Math.min(explicit ?? OPENAI_EMBEDDING_INPUT_TOKEN_BUDGET, OPENAI_EMBEDDING_INPUT_TOKEN_BUDGET);
+  return Math.min(explicit ?? EMBEDDING_INPUT_TOKEN_BUDGET, EMBEDDING_INPUT_TOKEN_BUDGET);
 }
 
 function decodeTokenBytes(tokenBytes: Uint8Array[]): string {
@@ -113,12 +137,12 @@ function startsWithContinuationByte(bytes: Uint8Array | undefined): boolean {
   return first !== undefined && (first & 0xc0) === 0x80;
 }
 
-function batchChunks(chunks: OpenAiEmbeddingChunk[]): OpenAiEmbeddingChunk[][] {
-  const batches: OpenAiEmbeddingChunk[][] = [];
-  let current: OpenAiEmbeddingChunk[] = [];
+function batchChunks(chunks: EmbeddingChunk[]): EmbeddingChunk[][] {
+  const batches: EmbeddingChunk[][] = [];
+  let current: EmbeddingChunk[] = [];
   let currentTokens = 0;
   for (const chunk of chunks) {
-    if (current.length > 0 && currentTokens + chunk.tokens.length > OPENAI_EMBEDDING_BATCH_TOKEN_BUDGET) {
+    if (current.length > 0 && currentTokens + chunk.tokens.length > EMBEDDING_BATCH_TOKEN_BUDGET) {
       batches.push(current);
       current = [];
       currentTokens = 0;

@@ -5,6 +5,7 @@ import { get_encoding } from "tiktoken";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG } from "../src/config/index.js";
 import { createEmbedder } from "../src/model/embedder.js";
+import { EMBEDDING_INPUT_TOKEN_BUDGET } from "../src/model/embedding-inputs.js";
 
 const transformerMocks = vi.hoisted(() => ({
   env: {
@@ -102,7 +103,7 @@ describe("embedder", () => {
     const sentInputs = requestBodies.flatMap((body) => body.input);
 
     expect(sentInputs).toHaveLength(3);
-    expect(sentInputs.every((input) => Array.isArray(input) && input.length <= 7_500)).toBe(true);
+    expect(sentInputs.every((input) => Array.isArray(input) && input.length <= EMBEDDING_INPUT_TOKEN_BUDGET)).toBe(true);
     const firstWeight = sentInputs[0]!.length;
     const secondWeight = sentInputs[1]!.length;
     const totalWeight = firstWeight + secondWeight;
@@ -162,7 +163,7 @@ describe("embedder", () => {
 
     expect(sentInputs.length).toBeGreaterThan(1);
     const encoder = get_encoding("cl100k_base");
-    expect(sentInputs.every((input) => encoder.encode(input).length <= 7_500)).toBe(true);
+    expect(sentInputs.every((input) => encoder.encode(input).length <= EMBEDDING_INPUT_TOKEN_BUDGET)).toBe(true);
     expect(sentInputs.join("")).toBe(" memory".repeat(8_001));
   });
 
@@ -235,12 +236,96 @@ describe("embedder", () => {
       maxRetries: 0
     });
 
-    const vectors = await embedder.embed(Array.from({ length: 40 }, () => " memory".repeat(7_400)));
+    const vectors = await embedder.embed(Array.from({ length: 45 }, () => " memory".repeat(6_500)));
 
-    expect(vectors).toHaveLength(40);
+    expect(vectors).toHaveLength(45);
     expect(requestTokenCounts.length).toBeGreaterThan(1);
     expect(requestTokenCounts.every((count) => count <= 290_000)).toBe(true);
-    expect(requestInputCounts.reduce((sum, count) => sum + count, 0)).toBe(40);
+    expect(requestInputCounts.reduce((sum, count) => sum + count, 0)).toBe(45);
+  });
+
+  it("keeps the per-input budget clear of the 8192-token limit providers enforce", () => {
+    expect(EMBEDDING_INPUT_TOKEN_BUDGET).toBeLessThanOrEqual(8_192 * 0.87);
+  });
+
+  it("chunks oversized Gemini inputs instead of sending one over-limit request", async () => {
+    const sentTexts: string[] = [];
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        requests: Array<{ content: { parts: Array<{ text: string }> } }>;
+      };
+      sentTexts.push(...body.requests.map((request) => request.content.parts[0]!.text));
+      return new Response(JSON.stringify({
+        embeddings: body.requests.map(() => ({ values: [1, 0] }))
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    const embedder = createEmbedder({
+      ...DEFAULT_MEMMY_CONFIG.embedding,
+      provider: "gemini",
+      model: "text-embedding-004",
+      apiKey: "gemini-test",
+      cache: false,
+      maxRetries: 0
+    });
+
+    await expect(embedder.embedOne(" memory".repeat(8_001))).resolves.toEqual([1, 0]);
+
+    const encoder = get_encoding("cl100k_base");
+    expect(sentTexts.length).toBeGreaterThan(1);
+    expect(sentTexts.every((text) => encoder.encode(text).length <= EMBEDDING_INPUT_TOKEN_BUDGET)).toBe(true);
+    expect(sentTexts.join("")).toBe(" memory".repeat(8_001));
+  });
+
+  it("chunks oversized Cohere inputs instead of sending one over-limit request", async () => {
+    const sentTexts: string[] = [];
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { texts: string[] };
+      sentTexts.push(...body.texts);
+      return new Response(JSON.stringify({
+        embeddings: { float: body.texts.map(() => [1, 0]) }
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    const embedder = createEmbedder({
+      ...DEFAULT_MEMMY_CONFIG.embedding,
+      provider: "cohere",
+      model: "embed-v4.0",
+      apiKey: "cohere-test",
+      cache: false,
+      maxRetries: 0
+    });
+
+    await expect(embedder.embedOne(" memory".repeat(8_001))).resolves.toEqual([1, 0]);
+
+    const encoder = get_encoding("cl100k_base");
+    expect(sentTexts.length).toBeGreaterThan(1);
+    expect(sentTexts.every((text) => encoder.encode(text).length <= EMBEDDING_INPUT_TOKEN_BUDGET)).toBe(true);
+    expect(sentTexts.join("")).toBe(" memory".repeat(8_001));
+  });
+
+  it("chunks oversized Voyage inputs as text rather than OpenAI token ids", async () => {
+    const sentInputs: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { input: unknown[] };
+      sentInputs.push(...body.input);
+      return new Response(JSON.stringify({
+        data: body.input.map(() => ({ embedding: [1, 0] }))
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    const embedder = createEmbedder({
+      ...DEFAULT_MEMMY_CONFIG.embedding,
+      provider: "voyage",
+      model: "voyage-3",
+      apiKey: "voyage-test",
+      cache: false,
+      maxRetries: 0
+    });
+
+    await expect(embedder.embedOne(" memory".repeat(8_001))).resolves.toEqual([1, 0]);
+
+    const encoder = get_encoding("cl100k_base");
+    expect(sentInputs.length).toBeGreaterThan(1);
+    expect(sentInputs.every((input) =>
+      typeof input === "string" && encoder.encode(input).length <= EMBEDDING_INPUT_TOKEN_BUDGET)).toBe(true);
   });
 
   it("does not ask the local extractor to normalize by default", async () => {

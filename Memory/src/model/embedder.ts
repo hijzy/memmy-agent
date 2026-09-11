@@ -8,9 +8,10 @@ import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { stableHash } from "../utils/id.js";
 import { bearer, postJsonWithRetry, trimTrailingSlash } from "./http.js";
 import {
-  aggregateOpenAiEmbeddingVectors,
-  planOpenAiEmbeddingInputs
-} from "./openai-embedding-inputs.js";
+  aggregateEmbeddingVectors,
+  planEmbeddingInputs,
+  requireTextInput
+} from "./embedding-inputs.js";
 import { HttpByokTokenUsageRecorder, extractModelTokenUsage } from "./token-usage.js";
 import type { Embedder, ModelStatus } from "./types.js";
 
@@ -222,21 +223,35 @@ class HttpEmbedder implements Embedder {
     if (!this.config.apiKey && !this.config.endpoint) {
       throw new Error(`${provider} embedding provider requires apiKey or endpoint`);
     }
-    const plan = provider === "openai_compatible"
-      ? planOpenAiEmbeddingInputs(texts, this.config.model, this.config.maxInputTokens)
-      : null;
-    if (!plan) return this.requestOpenAiShape(texts, provider, url, role);
+    return this.embedChunked(
+      texts,
+      provider === "openai_compatible",
+      (inputs) => this.requestOpenAiShape(inputs, provider, url, role)
+    );
+  }
+
+  /**
+   * Splits inputs that would overrun the provider's per-input token limit and
+   * recombines the chunk vectors, so a single oversized memory cannot fail the
+   * whole embedding request.
+   */
+  private async embedChunked(
+    texts: string[],
+    tokenIdsSupported: boolean,
+    send: (inputs: Array<string | number[]>) => Promise<number[][]>
+  ): Promise<number[][]> {
+    const plan = planEmbeddingInputs(texts, {
+      model: this.config.model,
+      maxInputTokens: this.config.maxInputTokens,
+      tokenIdsSupported
+    });
+    if (!plan) return send(texts);
 
     const chunkVectors: number[][] = [];
     for (const batch of plan.batches) {
-      chunkVectors.push(...await this.requestOpenAiShape(
-        batch.map((chunk) => chunk.input),
-        provider,
-        url,
-        role
-      ));
+      chunkVectors.push(...await send(batch.map((chunk) => chunk.input)));
     }
-    return aggregateOpenAiEmbeddingVectors(plan, chunkVectors);
+    return aggregateEmbeddingVectors(plan, chunkVectors);
   }
 
   private async requestOpenAiShape(
@@ -268,13 +283,18 @@ class HttpEmbedder implements Embedder {
     return vectors;
   }
 
-  private async embedGemini(texts: string[], role: "query" | "document"): Promise<number[][]> {
+  private embedGemini(texts: string[], role: "query" | "document"): Promise<number[][]> {
     if (!this.config.apiKey) {
       throw new Error("gemini embedding provider requires apiKey");
     }
+    return this.embedChunked(texts, false, (inputs) =>
+      this.requestGemini(inputs.map(requireTextInput), role));
+  }
+
+  private async requestGemini(texts: string[], role: "query" | "document"): Promise<number[][]> {
     const base = trimTrailingSlash(this.config.endpoint || "https://generativelanguage.googleapis.com/v1beta");
     const model = this.config.model || "text-embedding-004";
-    const url = `${base}/models/${encodeURIComponent(model)}:batchEmbedContents?key=${encodeURIComponent(this.config.apiKey)}`;
+    const url = `${base}/models/${encodeURIComponent(model)}:batchEmbedContents?key=${encodeURIComponent(this.config.apiKey!)}`;
     const response = await postJsonWithRetry<GeminiEmbeddingResponse>({
       actualModelContext: this.config.actualModelContext,
       provider: "gemini",
@@ -297,10 +317,15 @@ class HttpEmbedder implements Embedder {
     return vectors;
   }
 
-  private async embedCohere(texts: string[], role: "query" | "document"): Promise<number[][]> {
+  private embedCohere(texts: string[], role: "query" | "document"): Promise<number[][]> {
     if (!this.config.apiKey) {
       throw new Error("cohere embedding provider requires apiKey");
     }
+    return this.embedChunked(texts, false, (inputs) =>
+      this.requestCohere(inputs.map(requireTextInput), role));
+  }
+
+  private async requestCohere(texts: string[], role: "query" | "document"): Promise<number[][]> {
     const url = this.config.endpoint || "https://api.cohere.com/v2/embed";
     const response = await postJsonWithRetry<CohereEmbeddingResponse>({
       actualModelContext: this.config.actualModelContext,
