@@ -163,6 +163,73 @@ describe("standalone scan boundaries", () => {
     }
   });
 
+  // The v1.1.5 migration hands over per-conversation checkpoints but no
+  // source-level content hash, because the Desktop never kept one. The old
+  // prepare step read a missing hash as "the source changed" and reselected
+  // every conversation, which is a rewrite of the user's whole history.
+  it("does not reselect a migrated source just because it has no source content hash", async () => {
+    const root = tempRoot();
+    const history = [
+      ...turn("one", "2026-08-28T00:00:00.000Z"),
+      ...turn("two", "2026-08-28T01:00:00.000Z")
+    ];
+    const harness = createHarness(root, history);
+    try {
+      await harness.executor.startScan({ sourceId: "fixture-agent", mode: "full" });
+      await waitForScan(harness.executor);
+      expect(harness.addMemory).toHaveBeenCalledTimes(2);
+
+      const state = JSON.parse(readFileSync(join(root, "agent-sources.json"), "utf8"));
+      delete state.sources["fixture-agent"].contentHash;
+      writeFileSync(join(root, "agent-sources.json"), JSON.stringify(state));
+      await harness.executor.dispose();
+
+      const migrated = createHarness(root, history);
+      try {
+        await migrated.executor.startScan({ sourceId: "fixture-agent" });
+        await waitForScan(migrated.executor);
+        expect(migrated.executor.scanStatus().error).toBeNull();
+        expect(migrated.addMemory).not.toHaveBeenCalled();
+      } finally {
+        await migrated.executor.dispose();
+      }
+    } finally {
+      await harness.executor.dispose();
+    }
+  });
+
+  it("leaves history older than a migrated boundary alone even with no checkpoint for it", async () => {
+    const root = tempRoot();
+    writeFileSync(join(root, "agent-sources.json"), JSON.stringify({
+      version: 3,
+      sources: {
+        "fixture-agent": {
+          status: "not_connected",
+          messageCount: 200,
+          lastScannedAt: "2026-08-28T00:00:00.000Z",
+          // A source first scanned with initial_subset: only the newest turns
+          // were imported, and the boundary is the scan itself.
+          latestSeenAt: "2026-08-28T00:00:00.000Z",
+          baselineAt: "2026-08-28T00:00:00.000Z",
+          checkpoints: {}
+        }
+      },
+      manual: {}
+    }));
+    const harness = createHarness(root, [
+      ...turn("ancient", "2020-01-01T00:00:00.000Z"),
+      ...turn("old", "2024-06-01T00:00:00.000Z")
+    ]);
+    try {
+      await harness.executor.startScan({ sourceId: "fixture-agent" });
+      await waitForScan(harness.executor);
+      expect(harness.executor.scanStatus().error).toBeNull();
+      expect(harness.addMemory).not.toHaveBeenCalled();
+    } finally {
+      await harness.executor.dispose();
+    }
+  });
+
   it("records who asked for the scan", async () => {
     const root = tempRoot();
     const harness = createHarness(root, [...turn("one", "2026-08-28T00:00:00.000Z")]);

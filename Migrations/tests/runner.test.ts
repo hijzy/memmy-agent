@@ -116,6 +116,7 @@ describe("migration runner", () => {
     expect(first.deferred).toEqual([
       "v1.0.7/0002-import-legacy-app-state-model-config",
       "v1.1.4/0001-import-legacy-app-scan-preferences",
+      "v1.1.5/0001-move-agent-source-scan-state-to-memory-service",
     ]);
     expect(first.results).toEqual({ scanned: 5, changed: 2, ignored: 3 });
     expect(second).toEqual({
@@ -131,6 +132,7 @@ describe("migration runner", () => {
       deferred: [
         "v1.0.7/0002-import-legacy-app-state-model-config",
         "v1.1.4/0001-import-legacy-app-scan-preferences",
+        "v1.1.5/0001-move-agent-source-scan-state-to-memory-service",
       ],
       results: { scanned: 0, changed: 0, ignored: 0 },
     });

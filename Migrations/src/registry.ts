@@ -6,6 +6,7 @@ import { addGoalDagBoundaryV107 } from "./migrations/v1.0.7/0004-add-goal-dag-bo
 import { repairRuntimeModelCatalogV109 } from "./migrations/v1.0.9/0001-repair-runtime-model-catalog.js";
 import { upgradeSummaryTimeoutV112 } from "./migrations/v1.1.2/0001-upgrade-summary-timeout.js";
 import { importLegacyAppScanPreferencesV114 } from "./migrations/v1.1.4/0001-import-legacy-app-scan-preferences.js";
+import { moveAgentSourceScanStateToMemoryServiceV115 } from "./migrations/v1.1.5/0001-move-agent-source-scan-state-to-memory-service.js";
 import { MigrationError, type MigrationDefinition } from "./types.js";
 
 const STABLE_SEMVER_PATTERN =
@@ -28,6 +29,7 @@ export const migrations: readonly MigrationDefinition[] = [
   repairRuntimeModelCatalogV109,
   upgradeSummaryTimeoutV112,
   importLegacyAppScanPreferencesV114,
+  moveAgentSourceScanStateToMemoryServiceV115,
 ];
 
 function definitionError(message: string, migrationId: string | null = null): never {
