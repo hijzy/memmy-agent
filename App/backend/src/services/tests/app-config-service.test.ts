@@ -653,6 +653,42 @@ describe("AppConfigService", () => {
     expect(calls).toEqual([{ settings: { userMode: "account" } }]);
   });
 
+  it("projects the scan permission answer onto the memory service switches before recording it", async () => {
+    const calls: string[] = [];
+    const service = createAppConfigService({
+      bootstrapRepository: {
+        ...createBootstrapRepositoryStub(),
+        updateOnboarding(patch) {
+          calls.push(`onboarding:${patch.scanPermission ?? patch.currentStep}`);
+          return { ...onboardingState(), ...patch };
+        }
+      },
+      scanPreferencesStore: {
+        getScanPreferences: () => ({ autoScanKnownAgents: false, watchFileChanges: false, autoInjectSkill: false }),
+        async updateScanPreferences(patch) {
+          calls.push(`switches:${JSON.stringify(patch)}`);
+          if (patch.autoInjectSkill) throw new Error("memory layer unavailable");
+          return { autoScanKnownAgents: false, watchFileChanges: false, autoInjectSkill: false, ...patch };
+        }
+      }
+    });
+
+    await service.updateOnboarding({ scanPermission: "scan_only" });
+    await service.updateOnboarding({ scanPermission: "none" });
+    await service.updateOnboarding({ currentStep: "product_tour_required" });
+    await expect(service.updateOnboarding({ scanPermission: "scan_and_write_skill" })).rejects.toThrow("memory layer unavailable");
+
+    expect(calls).toEqual([
+      'switches:{"autoScanKnownAgents":true,"watchFileChanges":true,"autoInjectSkill":false}',
+      "onboarding:scan_only",
+      'switches:{"autoScanKnownAgents":false,"watchFileChanges":false,"autoInjectSkill":false}',
+      "onboarding:none",
+      "onboarding:product_tour_required",
+      // A rejected write leaves the local answer untouched so the user retries.
+      'switches:{"autoScanKnownAgents":true,"watchFileChanges":true,"autoInjectSkill":true}'
+    ]);
+  });
+
   it("updates privacy, onboarding, and improvement program through the bootstrap repository", async () => {
     const calls: unknown[] = [];
     const service = createAppConfigService({

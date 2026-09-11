@@ -189,6 +189,56 @@ describe("local Viewer API", () => {
     });
   });
 
+  it("reports the on-disk scan switches and re-arms automation on every config reload", async () => {
+    const rescheduleAutomation = vi.fn();
+    const fixture = await startFixture({
+      agentSourceExecutor: {
+        list: async () => ({ executorAvailable: true, sources: [] }),
+        startScan: async () => ({ accepted: true, jobId: "scan-1" }),
+        scanStatus: () => ({ running: false, jobId: null, sourceId: null, mode: null, progress: null, startedAt: null, completedAt: null, error: null }),
+        pauseScan: async () => ({ ok: true }),
+        cancelScan: async () => ({ ok: true }),
+        mutateConnection: async () => ({ ok: true }),
+        startAutomation: () => undefined,
+        rescheduleAutomation,
+        dispose: () => undefined
+      }
+    });
+
+    // Another writer (Memmy Desktop, a text editor) changed the YAML without
+    // telling the service: the Viewer must still show what is on disk.
+    const raw = YAML.parse(readFileSync(fixture.configPath, "utf8")) as { memmyMemory: Record<string, unknown> };
+    raw.memmyMemory.agentAccess = { autoScanKnownAgents: false, watchFileChanges: false, autoInjectSkill: true };
+    writeFileSync(fixture.configPath, YAML.stringify(raw));
+    const read = await viewerFetch(fixture.baseUrl, "/api/v1/config");
+    expect(((await read.json()) as { config: { agentAccess: unknown } }).config.agentAccess).toEqual({
+      autoScanKnownAgents: false,
+      watchFileChanges: false,
+      autoInjectSkill: true
+    });
+    expect(rescheduleAutomation).not.toHaveBeenCalled();
+
+    const patched = await viewerFetch(fixture.baseUrl, "/api/v1/config", {
+      method: "PATCH",
+      body: JSON.stringify({ config: { agentAccess: { autoScanKnownAgents: true } } })
+    });
+    expect(patched.status).toBe(200);
+    expect(((await patched.json()) as { config: { agentAccess: unknown } }).config.agentAccess).toEqual({
+      autoScanKnownAgents: true,
+      watchFileChanges: false,
+      autoInjectSkill: true
+    });
+    expect(rescheduleAutomation).toHaveBeenCalledTimes(1);
+
+    const reloaded = await fetch(`${fixture.baseUrl}/api/v1/admin/reload-config`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason: "test" })
+    });
+    expect(reloaded.status).toBe(200);
+    expect(rescheduleAutomation).toHaveBeenCalledTimes(2);
+  });
+
   it("exposes standalone scan pause and cancel controls to the Viewer", async () => {
     const pauseScan = vi.fn(async () => ({ ok: true as const }));
     const cancelScan = vi.fn(async () => ({ ok: true as const }));
@@ -209,6 +259,7 @@ describe("local Viewer API", () => {
       cancelScan,
       mutateConnection: async () => ({ ok: true }),
       startAutomation: () => undefined,
+      rescheduleAutomation: () => undefined,
       dispose: () => undefined
     };
     const fixture = await startFixture({ agentSourceExecutor });

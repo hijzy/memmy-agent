@@ -17,6 +17,7 @@ import type {
   MemoryGovernanceRequest,
   MemoryLayer,
   MemoryReloadConfigRequest,
+  MemoryReloadConfigResponse,
   MemorySearchRequest,
   RequestEnvelope,
   RuntimeNamespace,
@@ -140,6 +141,15 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
     configPath: options.configPath,
     scheduleWorker: autoWorker.schedule
   });
+  // Every config reload, whichever surface asked for it, re-arms the worker
+  // and the Agent-source automation so a flipped agentAccess switch takes
+  // effect on the schedule and not only at the next hourly tick.
+  const reloadConfig = (request: MemoryReloadConfigRequest): MemoryReloadConfigResponse => {
+    const result = options.service.reloadConfig(request);
+    autoWorker.schedule();
+    agentSources.rescheduleAutomation();
+    return result;
+  };
   const activeRequests = new Set<Promise<void>>();
   const server = createServer((request, response) => {
     const handling = handleRequest(request, response);
@@ -175,6 +185,7 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
           configPath: options.configPath,
           routes: API_ROUTES,
           scheduleWorker: autoWorker.schedule,
+          reloadConfig,
           timeZone: requestTimeZone(request, options.timeZone),
           agentSources
         }, request, response, url);
@@ -191,6 +202,7 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
           configPath: options.configPath,
           routes: API_ROUTES,
           scheduleWorker: autoWorker.schedule,
+          reloadConfig,
           timeZone: principal.timeZone,
           viewerCli: options.viewerCli,
           restartService: options.onRestartRequested,
@@ -214,6 +226,7 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
       const result = await routeRequest(
         options.service,
         autoWorker,
+        reloadConfig,
         request.method,
         url,
         body,
@@ -482,6 +495,7 @@ function nextWorkerRunAfterDelayMs(service: MemoryService): number | undefined {
 async function routeRequest(
   service: MemoryService,
   autoWorker: AutoWorkerDrain,
+  reloadConfig: (request: MemoryReloadConfigRequest) => MemoryReloadConfigResponse,
   method: string,
   url: URL,
   body: unknown,
@@ -498,7 +512,7 @@ async function routeRequest(
   if (method === "POST" && path === "/api/v1/admin/reload-config") {
     requireAdminWrite(principal);
     const request = asObject(body, "admin.reload-config") as MemoryReloadConfigRequest;
-    const result = service.reloadConfig({
+    return reloadConfig({
       requestId: typeof request.requestId === "string" ? request.requestId : undefined,
       adapterId: typeof request.adapterId === "string" ? request.adapterId : undefined,
       reason: typeof request.reason === "string" ? request.reason : undefined,
@@ -507,8 +521,6 @@ async function routeRequest(
         ? request.restartFailedProcessing
         : undefined
     });
-    autoWorker.schedule();
-    return result;
   }
   if (method === "POST" && path === "/api/v1/admin/shutdown") {
     requireAdminWrite(principal);

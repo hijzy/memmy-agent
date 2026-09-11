@@ -452,6 +452,12 @@ describe("packaged desktop runtime config", () => {
           backend: "sqlite",
           sqlitePath: join(memmyHome, "memory-service", "memory.sqlite"),
           endpoint: "http://127.0.0.1:18960"
+        },
+        // Nothing is scanned until the onboarding answer turns the switches on.
+        agentAccess: {
+          autoScanKnownAgents: false,
+          watchFileChanges: false,
+          autoInjectSkill: false
         }
       }
     });
@@ -600,6 +606,10 @@ describe("packaged desktop runtime config", () => {
           endpoint: "http://127.0.0.1:18888",
           token: "memory-token",
           sqlitePath
+        },
+        agentAccess: {
+          autoScanKnownAgents: true,
+          autoInjectSkill: true
         }
       },
       providers: {
@@ -648,6 +658,12 @@ describe("packaged desktop runtime config", () => {
       endpoint: "http://127.0.0.1:18888",
       token: "memory-token",
       sqlitePath
+    });
+    // Recorded switches stay as they are; only the absent one gets the desktop default.
+    expect(recordValue(recordValue(config, "memmyMemory"), "agentAccess")).toEqual({
+      autoScanKnownAgents: true,
+      watchFileChanges: false,
+      autoInjectSkill: true
     });
     expect(recordValue(config, "fileMemory")).toEqual({ enabled: true });
     expect(recordValue(config, "futureSection")).toEqual({ keepMe: true });

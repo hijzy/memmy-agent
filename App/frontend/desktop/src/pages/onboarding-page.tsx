@@ -59,6 +59,7 @@ type FirstScanStep = "checking_plugins" | "plugin_conflict" | "scanning" | "prep
 const FIRST_SCAN_ANIMATION_MIN_MS = 2_000;
 const FIRST_ENCOUNTER_MEMORY_VERIFY_TIMEOUT_MS = 60_000;
 const FIRST_ENCOUNTER_MEMORY_VERIFY_INTERVAL_MS = 2_000;
+const PERMISSION_MEMORY_PROBE_INTERVAL_MS = 1_500;
 
 /** Handles onboarding page. */
 export function OnboardingPage() {
@@ -77,6 +78,9 @@ export function OnboardingPage() {
   const [pluginConflictOpen, setPluginConflictOpen] = useState(false);
   const [pluginConflicts, setPluginConflicts] = useState<AgentSourceMemoryPluginConflict[]>([]);
   const [pluginConflictResolving, setPluginConflictResolving] = useState(false);
+  // The permission answer is written into the memory service's config, so the
+  // choice waits until the service (which may still be booting) answers.
+  const [memoryServiceReady, setMemoryServiceReady] = useState(false);
   const isCompletingOnboarding = useRef(false);
   const hasStartedAgentSourceScan = useRef(false);
   const hasResumedFirstScan = useRef(false);
@@ -130,6 +134,35 @@ export function OnboardingPage() {
   useEffect(() => {
     firstScanStepRef.current = firstScanStep;
   }, [firstScanStep]);
+
+  useEffect(() => {
+    if (!scanOpen || !clients) {
+      return;
+    }
+    let active = true;
+    let timer: number | null = null;
+    const probe = async () => {
+      try {
+        const health = await clients.memoryRuntime.health();
+        if (!active) return;
+        if (health.ok && health.storage.ready) {
+          setMemoryServiceReady(true);
+          return;
+        }
+      } catch {
+        // Still booting; try again below.
+      }
+      if (active) {
+        setMemoryServiceReady(false);
+        timer = window.setTimeout(() => void probe(), PERMISSION_MEMORY_PROBE_INTERVAL_MS);
+      }
+    };
+    void probe();
+    return () => {
+      active = false;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [clients, scanOpen]);
 
   useEffect(() => {
     if (activeFirstScanStep !== "report" || !firstReportPayload || !clients || hasTrackedFirstReportView.current) {
@@ -221,14 +254,11 @@ export function OnboardingPage() {
     void completeOnboarding("full");
   }, [onboarding]);
 
-  /** Handles choose permission. */
+  /**
+   * Handles choose permission. The backend projects the answer onto the three
+   * scan switches while saving it, so the page only reads the switches back.
+   */
   async function choosePermission(permission: ScanPermission) {
-    const preferences =
-      permission === "scan_and_write_skill"
-        ? { autoScanKnownAgents: true, watchFileChanges: true, autoInjectSkill: true }
-        : permission === "scan_only"
-          ? { autoScanKnownAgents: true, watchFileChanges: true, autoInjectSkill: false }
-          : { autoScanKnownAgents: false, watchFileChanges: false, autoInjectSkill: false };
     const patch = permission === "none"
       ? {
           scanPermission: permission,
@@ -238,7 +268,6 @@ export function OnboardingPage() {
       : { completed: false, currentStep: "scan_permission_required", scanPermission: permission } as const;
 
     dispatch(appActions.onboardingUpdated(patch));
-    dispatch(appActions.scanPreferencesUpdated(preferences));
     track(buildOnboardingStepCompletedEvent({
       step: "scan_permission",
       choice: permission,
@@ -250,7 +279,7 @@ export function OnboardingPage() {
         try {
           const persistedPatch = await clients.config.updateOnboarding(patch);
           dispatch(appActions.onboardingUpdated(persistedPatch));
-          dispatch(appActions.scanPreferencesUpdated(await clients.config.updateScanPreferences(preferences)));
+          dispatch(appActions.scanPreferencesUpdated(await clients.config.getScanPreferences()));
           if (permission === "scan_and_write_skill") {
             void startFirstScanInBackground().catch((error) => {
               console.warn("start first agent source scan failed", error);
@@ -273,7 +302,7 @@ export function OnboardingPage() {
         .updateOnboarding(patch)
         .then((persistedPatch) => {
           dispatch(appActions.onboardingUpdated(persistedPatch));
-          return clients.config.updateScanPreferences(preferences);
+          return clients.config.getScanPreferences();
         })
         .then((persistedPreferences) => {
           dispatch(appActions.scanPreferencesUpdated(persistedPreferences));
@@ -351,8 +380,9 @@ export function OnboardingPage() {
   }
 
   function returnToScanPermission() {
+    // Back to "not answered yet": the backend projects `unset` onto the scan
+    // switches (all off) while saving, the same way it projects an answer.
     const onboardingPatch = { completed: false, currentStep: "scan_permission_required", scanPermission: "unset" } as const;
-    const preferences = { autoScanKnownAgents: true, watchFileChanges: true, autoInjectSkill: false };
 
     setPluginConflictOpen(false);
     setPluginConflicts([]);
@@ -368,18 +398,15 @@ export function OnboardingPage() {
     firstScanVisualComplete.current = false;
     setFirstScanStep(null);
     dispatch(appActions.onboardingUpdated(onboardingPatch));
-    dispatch(appActions.scanPreferencesUpdated(preferences));
     void clients?.config
       .updateOnboarding(onboardingPatch)
-      .then((persistedPatch) => dispatch(appActions.onboardingUpdated(persistedPatch)))
-      .catch((error) => {
-        console.warn("return to scan permission failed", error);
-      });
-    void clients?.config
-      .updateScanPreferences(preferences)
+      .then((persistedPatch) => {
+        dispatch(appActions.onboardingUpdated(persistedPatch));
+        return clients.config.getScanPreferences();
+      })
       .then((persistedPreferences) => dispatch(appActions.scanPreferencesUpdated(persistedPreferences)))
       .catch((error) => {
-        console.warn("reset scan preferences failed", error);
+        console.warn("return to scan permission failed", error);
       });
   }
 
@@ -833,27 +860,32 @@ export function OnboardingPage() {
               />
             </div>
 
-            <p className="text-xs text-text-ink/50 text-center mt-5 px-7">{t("onboarding.permission.notice")}</p>
+            <p className="text-xs text-text-ink/50 text-center mt-5 px-7">
+              {t(memoryServiceReady ? "onboarding.permission.notice" : "onboarding.permission.memoryStarting")}
+            </p>
 
             <div className="flex gap-3 px-7 py-6 mt-2">
               <button
                 type="button"
+                disabled={!memoryServiceReady}
                 onClick={() => void choosePermission("none")}
-                className="flex-1 py-3 text-sm text-text-ink/65 bg-canvas-oat border border-border-stone/40 rounded-btn hover:bg-canvas-oat/80 transition-colors cursor-pointer"
+                className="flex-1 py-3 text-sm text-text-ink/65 bg-canvas-oat border border-border-stone/40 rounded-btn hover:bg-canvas-oat/80 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {t("onboarding.permission.none")}
               </button>
               <button
                 type="button"
+                disabled={!memoryServiceReady}
                 onClick={() => void choosePermission("scan_only")}
-                className="flex-1 py-3 text-sm text-text-ink/70 bg-background-paper border border-border-stone rounded-btn hover:bg-canvas-oat/40 transition-colors cursor-pointer"
+                className="flex-1 py-3 text-sm text-text-ink/70 bg-background-paper border border-border-stone rounded-btn hover:bg-canvas-oat/40 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {t("onboarding.permission.scan")}
               </button>
               <button
                 type="button"
+                disabled={!memoryServiceReady}
                 onClick={() => void choosePermission("scan_and_write_skill")}
-                className="flex-1 py-3 text-sm text-white bg-action-sky rounded-btn hover:bg-action-sky-hover transition-colors font-semibold cursor-pointer shadow-md"
+                className="flex-1 py-3 text-sm text-white bg-action-sky rounded-btn hover:bg-action-sky-hover transition-colors font-semibold cursor-pointer shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {t("onboarding.permission.all")}
               </button>

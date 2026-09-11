@@ -451,6 +451,65 @@ describe("standalone Agent source executor", () => {
     executor.dispose();
   });
 
+  it("re-arms the automation timer when the scan switches change on disk", async () => {
+    vi.useFakeTimers();
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    const writeSwitches = (autoScanKnownAgents: boolean) => writeFileSync(configPath, [
+      "memmyMemory:",
+      "  agentAccess:",
+      `    autoScanKnownAgents: ${autoScanKnownAgents}`,
+      "    watchFileChanges: false",
+      "    autoInjectSkill: false",
+      ""
+    ].join("\n"));
+    const detect = vi.fn(async () => true);
+    const executor = createAgentSourceExecutor({
+      service: { addMemory: vi.fn(() => ({ id: "memory-1" })), enqueuePendingImportSummaries: vi.fn() } as unknown as MemoryService,
+      configPath,
+      statePath: join(root, "agent-sources.json"),
+      sourceRegistry: createSourceRegistry([{
+        descriptor: { sourceId: "fixture-agent", displayName: "Fixture Agent", builtin: true, dataPath: root },
+        detect,
+        async *scan() { yield fixtureMessage("user", "user-1", "2026-08-28T01:00:00.000Z"); yield fixtureMessage("assistant", "assistant-1", "2026-08-28T01:00:30.000Z"); }
+      }]),
+      initialScanDelayMs: 10,
+      scheduledScanIntervalMs: 1_000
+    });
+
+    // Before automation starts a reload is a no-op, not an implicit start.
+    writeSwitches(true);
+    executor.rescheduleAutomation();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(detect).not.toHaveBeenCalled();
+
+    // Started with auto-scan off: only the hourly tick is armed.
+    writeSwitches(false);
+    executor.startAutomation();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(detect).not.toHaveBeenCalled();
+
+    // Switched on from another surface: the startup delay applies now, not
+    // after the remaining 500ms of the old hourly tick.
+    writeSwitches(true);
+    executor.rescheduleAutomation();
+    await vi.advanceTimersByTimeAsync(9);
+    expect(detect).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await waitForFakeTimerScan(executor);
+    expect(detect).toHaveBeenCalledTimes(1);
+
+    // Switched off again while the next hourly tick is pending: the pending
+    // startup-style timer is dropped in favor of the recurring one, and the
+    // recurring tick honors watchFileChanges=false.
+    writeSwitches(false);
+    executor.rescheduleAutomation();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await waitForFakeTimerScan(executor);
+    expect(detect).toHaveBeenCalledTimes(1);
+    await executor.dispose();
+  });
+
   it("imports skills from a discovered Agent into the same Memory service", async () => {
     const root = tempRoot();
     const codexRoot = join(root, ".codex");

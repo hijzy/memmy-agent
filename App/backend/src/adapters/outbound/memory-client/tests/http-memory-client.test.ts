@@ -16,6 +16,7 @@ describe("HttpMemoryClient", () => {
     expect(Object.values(MEMORY_LAYER_PATHS)).toEqual([
       "/api/v1/health",
       "/api/v1/admin/reload-config",
+      "/api/v1/config",
       "/api/v1/admin/export",
       "/api/v1/admin/data",
       "/api/v1/sessions/open",
@@ -53,6 +54,7 @@ describe("HttpMemoryClient", () => {
       authorization: string | undefined;
       timeZone: string | undefined;
       userId: string | undefined;
+      viewerMarker: string | undefined;
       body: unknown;
     }> = [];
     const baseUrl = await startServer(async (request, response) => {
@@ -63,6 +65,7 @@ describe("HttpMemoryClient", () => {
         authorization: request.headers.authorization,
         timeZone: request.headers["x-memmy-time-zone"] as string | undefined,
         userId: request.headers["x-memmy-user-id"] as string | undefined,
+        viewerMarker: request.headers["x-memmy-viewer"] as string | undefined,
         body
       });
       sendJson(response, fixtureFor(request.method ?? "", new URL(request.url ?? "/", "http://localhost").pathname, body));
@@ -80,6 +83,10 @@ describe("HttpMemoryClient", () => {
       models: {
         summary: { routing: "fixed" }
       }
+    });
+    await expect(client.patchConfig({ agentAccess: { autoScanKnownAgents: false } })).resolves.toMatchObject({
+      ok: true,
+      config: { agentAccess: { autoScanKnownAgents: false, watchFileChanges: true, autoInjectSkill: false } }
     });
     await expect(client.exportBundle!()).resolves.toMatchObject({ manifest: { service: "memmy-memory-service" } });
     await expect(client.clearAllData!()).resolves.toMatchObject({ ok: true, cleared: {} });
@@ -113,6 +120,7 @@ describe("HttpMemoryClient", () => {
     expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
       "GET /api/v1/health",
       "POST /api/v1/admin/reload-config",
+      "PATCH /api/v1/config",
       "GET /api/v1/admin/export",
       "DELETE /api/v1/admin/data",
       "POST /api/v1/sessions/open",
@@ -154,6 +162,13 @@ describe("HttpMemoryClient", () => {
     expect(requests.find((request) => request.path === "/api/v1/admin/reload-config")?.body).toEqual({
       reason: "profile_switched"
     });
+    // The config route sits behind the memory service's local Viewer API,
+    // whose CSRF guard rejects writes without the marker header.
+    expect(requests.find((request) => request.path === "/api/v1/config")).toMatchObject({
+      viewerMarker: "1",
+      body: { config: { agentAccess: { autoScanKnownAgents: false } } }
+    });
+    expect(requests.filter((request) => request.path !== "/api/v1/config").every((request) => request.viewerMarker === undefined)).toBe(true);
     expect(requests.find((request) => request.path === "/api/v1/memory/add")?.body).toMatchObject({
       content: "remember this",
       source: "codex"
@@ -428,6 +443,14 @@ function requestBodySource(body: unknown): string | undefined {
 function fixtureFor(method: string, path: string, body: unknown): unknown {
   if (method === "GET" && path === "/api/v1/health") return healthOutput();
   if (method === "POST" && path === "/api/v1/admin/reload-config") return reloadConfigOutput();
+  if (method === "PATCH" && path === "/api/v1/config") {
+    return {
+      ok: true,
+      reload: reloadConfigOutput(),
+      config: { agentAccess: { autoScanKnownAgents: false, watchFileChanges: true, autoInjectSkill: false }, summary: {} },
+      readOnly: []
+    };
+  }
   if (method === "GET" && path === "/api/v1/admin/export") {
     return { manifest: { service: "memmy-memory-service" }, tables: {} };
   }

@@ -28,7 +28,7 @@ import type { CloudClient } from "../adapters/outbound/cloud-client/index.js";
 import type { AccountSessionRepository } from "../infrastructure/app-state-store/repositories/account-session-repo.js";
 import type { BootstrapRepository } from "../infrastructure/app-state-store/repositories/bootstrap-repo.js";
 import type { MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
-import type { ScanPreferencesStore } from "../infrastructure/memmy-config/agent-access.js";
+import { scanPreferencesForPermission, type ScanPreferencesStore } from "../infrastructure/memmy-config/agent-access.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import { createHttpModelConfigTester, type ModelConfigTester } from "./model-config-tester.js";
 
@@ -124,6 +124,12 @@ export function createAppConfigService(options: CreateAppConfigServiceOptions): 
     },
 
     async updateOnboarding(input) {
+      // The permission answer lands in the memory service's scan switches
+      // first: if that write fails nothing is recorded locally either, so the
+      // user retries instead of the two sides disagreeing about consent.
+      if (input.scanPermission !== undefined && options.scanPreferencesStore) {
+        await options.scanPreferencesStore.updateScanPreferences(scanPreferencesForPermission(input.scanPermission));
+      }
       return options.bootstrapRepository.updateOnboarding(input);
     },
 

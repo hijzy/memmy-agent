@@ -40,21 +40,23 @@ describe("OnboardingPage source", () => {
     expect(routerSource).not.toContain("FORCE_FIRST_SCAN_PREVIEW");
   });
 
-  it("授权弹窗按本地状态先推进，再后台保存扫描授权", () => {
+  it("授权弹窗按本地状态先推进，再后台保存扫描授权并读回开关", () => {
     const source = readFileSync(onboardingPageSourcePath, "utf8");
     const handlerIndex = source.indexOf("function choosePermission(permission: ScanPermission)");
     const patchIndex = source.indexOf('const patch = permission === "none"', handlerIndex);
     const stateIndex = source.indexOf("dispatch(appActions.onboardingUpdated(patch));", handlerIndex);
-    const preferencesIndex = source.indexOf("dispatch(appActions.scanPreferencesUpdated(preferences));", handlerIndex);
     const saveIndex = source.indexOf(".updateOnboarding(patch)", handlerIndex);
+    const readBackIndex = source.indexOf("clients.config.getScanPreferences()", saveIndex);
     const catchIndex = source.indexOf('console.warn("save scan permission failed", error)', handlerIndex);
 
     expect(handlerIndex).toBeGreaterThanOrEqual(0);
     expect(patchIndex).toBeGreaterThan(handlerIndex);
     expect(stateIndex).toBeGreaterThan(patchIndex);
-    expect(preferencesIndex).toBeGreaterThan(stateIndex);
-    expect(saveIndex).toBeGreaterThan(preferencesIndex);
-    expect(catchIndex).toBeGreaterThan(saveIndex);
+    expect(saveIndex).toBeGreaterThan(stateIndex);
+    expect(readBackIndex).toBeGreaterThan(saveIndex);
+    expect(catchIndex).toBeGreaterThan(readBackIndex);
+    // The answer→switches projection lives in the backend; the page never writes the switches itself.
+    expect(source.slice(handlerIndex)).not.toContain("updateScanPreferences(");
   });
 
   it("拒绝授权后进原下一步，允许授权先进入扫描和初见报告", () => {

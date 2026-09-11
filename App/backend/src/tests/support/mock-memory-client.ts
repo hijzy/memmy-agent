@@ -19,6 +19,7 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
   const now = options.now ?? (() => new Date().toISOString());
   const failureRate = options.failureRate ?? 0;
   let changeSeqCounter = 0;
+  let agentAccess = { autoScanKnownAgents: true, watchFileChanges: true, autoInjectSkill: false };
 
   const nextChange = () => {
     changeSeqCounter += 1;
@@ -67,6 +68,16 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
         requiresRestart: false,
         models: mockModels(),
         reloadedAt: now()
+      };
+    },
+
+    async patchConfig(input) {
+      failIfNeeded();
+      agentAccess = { ...agentAccess, ...input.agentAccess };
+      return {
+        ok: true,
+        reload: { changed: true, requiresRestart: false, models: mockModels(), reloadedAt: now() },
+        config: { agentAccess }
       };
     },
 

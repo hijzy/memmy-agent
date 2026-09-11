@@ -113,7 +113,10 @@ describe("migration runner", () => {
       "v1.0.9/0001-repair-runtime-model-catalog",
       "v1.1.2/0001-upgrade-summary-timeout",
     ]);
-    expect(first.deferred).toEqual(["v1.0.7/0002-import-legacy-app-state-model-config"]);
+    expect(first.deferred).toEqual([
+      "v1.0.7/0002-import-legacy-app-state-model-config",
+      "v1.1.4/0001-import-legacy-app-scan-preferences",
+    ]);
     expect(first.results).toEqual({ scanned: 5, changed: 2, ignored: 3 });
     expect(second).toEqual({
       applied: [],
@@ -125,7 +128,10 @@ describe("migration runner", () => {
         "v1.0.9/0001-repair-runtime-model-catalog",
         "v1.1.2/0001-upgrade-summary-timeout",
       ],
-      deferred: ["v1.0.7/0002-import-legacy-app-state-model-config"],
+      deferred: [
+        "v1.0.7/0002-import-legacy-app-state-model-config",
+        "v1.1.4/0001-import-legacy-app-scan-preferences",
+      ],
       results: { scanned: 0, changed: 0, ignored: 0 },
     });
 

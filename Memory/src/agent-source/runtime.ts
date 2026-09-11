@@ -97,6 +97,8 @@ export interface AgentSourceExecutor {
   scanResults?(jobId: string, cursor?: string, limit?: number): Promise<{ items: Array<{ sourceId: string; conversationId: string; memoryId?: string; error?: string }>; nextCursor: string | null }>;
   mutateConnection(sourceId: string, kind: "plugin" | "skill", method: "POST" | "DELETE"): Promise<unknown>;
   startAutomation(): void;
+  /** Re-arms the automation timer after `memmyMemory.agentAccess` changed on disk. */
+  rescheduleAutomation(): void;
   dispose(): void | Promise<void>;
 }
 
@@ -145,6 +147,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   let progressBeforePause: ScanProgress | null = null;
   let resumePausedScan: (() => void) | undefined;
   let disposed = false;
+  let automationStarted = false;
   const activeScans = new Set<Promise<void>>();
   let activeAutomation: Promise<void> | undefined;
 
@@ -508,6 +511,16 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     scanTimer.unref?.();
   }
 
+  function scheduleAutomationFromConfig(): void {
+    const config = loadMemmyConfig(configPath).config.agentAccess;
+    scheduleAutomation(
+      config.autoScanKnownAgents
+        ? options.initialScanDelayMs ?? INITIAL_SCAN_DELAY_MS
+        : options.scheduledScanIntervalMs ?? SCHEDULED_SCAN_INTERVAL_MS,
+      config.autoScanKnownAgents
+    );
+  }
+
   async function runAutomation(startup: boolean): Promise<void> {
     if (disposed || scan.running) return;
     const config = loadMemmyConfig(configPath).config.agentAccess;
@@ -536,14 +549,17 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     scanResults,
     mutateConnection,
     startAutomation() {
-      if (scanTimer || disposed) return;
-      const config = loadMemmyConfig(configPath).config.agentAccess;
-      scheduleAutomation(
-        config.autoScanKnownAgents
-          ? options.initialScanDelayMs ?? INITIAL_SCAN_DELAY_MS
-          : options.scheduledScanIntervalMs ?? SCHEDULED_SCAN_INTERVAL_MS,
-        config.autoScanKnownAgents
-      );
+      if (automationStarted || disposed) return;
+      automationStarted = true;
+      scheduleAutomationFromConfig();
+    },
+    rescheduleAutomation() {
+      // Only a pending timer was armed under the old config. A run that is
+      // already in flight reads the config itself and re-arms when it exits.
+      if (!automationStarted || disposed || !scanTimer) return;
+      clearTimeout(scanTimer);
+      scanTimer = undefined;
+      scheduleAutomationFromConfig();
     },
     async dispose() {
       disposed = true;

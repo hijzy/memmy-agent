@@ -341,6 +341,30 @@ export const MemoryReloadConfigOutputSchema = z.object({
 });
 export type MemoryReloadConfigOutput = z.infer<typeof MemoryReloadConfigOutputSchema>;
 
+/**
+ * Cross-Agent scan switches under `memmyMemory.agentAccess`. The memory
+ * service owns this section of its config; Memmy Desktop edits it through
+ * `PATCH /api/v1/config` so the write and the reload happen in one place.
+ */
+export const MemoryAgentAccessConfigSchema = z.object({
+  autoScanKnownAgents: z.boolean(),
+  watchFileChanges: z.boolean(),
+  autoInjectSkill: z.boolean()
+});
+export type MemoryAgentAccessConfig = z.infer<typeof MemoryAgentAccessConfigSchema>;
+
+export const MemoryPatchConfigInputSchema = z.object({
+  agentAccess: MemoryAgentAccessConfigSchema.partial().optional()
+});
+export type MemoryPatchConfigInput = z.infer<typeof MemoryPatchConfigInputSchema>;
+
+export const MemoryPatchConfigOutputSchema = z.object({
+  ok: z.literal(true),
+  reload: MemoryReloadConfigOutputSchema,
+  config: z.object({ agentAccess: MemoryAgentAccessConfigSchema }).passthrough()
+}).passthrough();
+export type MemoryPatchConfigOutput = z.infer<typeof MemoryPatchConfigOutputSchema>;
+
 const LegacyOpenSessionInputSchema = RuntimeRequestFieldsSchema.extend({
   sessionId: NonEmptyStringSchema.optional(),
   workspacePath: z.string().optional()

@@ -86,6 +86,7 @@ describe("createMockMemoryClient", () => {
       "panelAnalysis",
       "panelItems",
       "panelOverview",
+      "patchConfig",
       "reloadConfig",
       "retryMemoryProcessing",
       "runWorker",

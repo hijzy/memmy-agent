@@ -1,9 +1,16 @@
 import { readFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { parse as parseYaml } from "yaml";
+import { loadMemmyConfig } from "../config/index.js";
 import { mutateMemoryConfig } from "../config/writer.js";
 import { syncMemoryModelCatalog } from "../config/model-catalog.js";
-import type { MemoryGovernanceRequest, MemoryImportRequest, RecallMemoryLayer } from "../types.js";
+import type {
+  MemoryGovernanceRequest,
+  MemoryImportRequest,
+  MemoryReloadConfigRequest,
+  MemoryReloadConfigResponse,
+  RecallMemoryLayer
+} from "../types.js";
 import { MemoryService } from "../service/memory-service.js";
 import { MemoryServiceError } from "../utils/error.js";
 import { resolveTimeZone } from "../utils/time.js";
@@ -63,6 +70,8 @@ export interface ViewerApiContext {
   configPath?: string;
   routes: readonly string[];
   scheduleWorker(): void;
+  /** Reloads the service config and re-arms every schedule that reads it. */
+  reloadConfig(request: MemoryReloadConfigRequest): MemoryReloadConfigResponse;
   timeZone?: string;
   viewerCli?: ViewerCliOptions;
   restartService?: () => void | Promise<void>;
@@ -367,7 +376,12 @@ async function viewerConfig(context: ViewerApiContext): Promise<Record<string, u
     config: {
       ...(status.config as unknown as Record<string, unknown>),
       ...(raw.hub ? { hub: redactSecrets(raw.hub) } : {}),
-      ...(raw.telemetry ? { telemetry: redactSecrets(raw.telemetry) } : {})
+      ...(raw.telemetry ? { telemetry: redactSecrets(raw.telemetry) } : {}),
+      // The scan switches are edited from three surfaces (this Viewer, Memmy
+      // Desktop, the YAML itself). Report what is on disk, which is also what
+      // the Agent-source automation reads on every tick, instead of the
+      // snapshot cached at the last reload.
+      ...(context.configPath ? { agentAccess: loadMemmyConfig(context.configPath).config.agentAccess } : {})
     },
     readOnly: ["storage.endpoint", "storage.sqlitePath", "storage.backend", "storage.mode"]
   };
@@ -403,8 +417,7 @@ async function patchViewerConfig(context: ViewerApiContext, body: unknown): Prom
     root.memmyMemory = next;
     syncMemoryModelCatalog(root, next, patch);
   });
-  const reload = context.service.reloadConfig({ reason: "viewer.config.patch" });
-  context.scheduleWorker();
+  const reload = context.reloadConfig({ reason: "viewer.config.patch" });
   return { ok: true, reload, ...(await viewerConfig(context)) };
 }
 

@@ -16,10 +16,7 @@ import {
   readConfiguredAgentTimeZone,
   readAgentGatewayBootstrapSecret
 } from "./infrastructure/memmy-config/index.js";
-import {
-  createMemoryScanPreferencesStore,
-  ensureMemoryScanPreferences
-} from "./infrastructure/memmy-config/agent-access.js";
+import { createMemoryScanPreferencesStore } from "./infrastructure/memmy-config/agent-access.js";
 import { createPermissionManager } from "./permission/index.js";
 import { createLocalApiServer } from "./adapters/inbound/local-api/server.js";
 import { createBackendServices, type BootstrapScenario } from "./services/index.js";
@@ -96,17 +93,12 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       memmyConfigPath,
       accountChannel: options.accountChannel
     });
-    await ensureMemoryScanPreferences(
-      memmyConfigPath,
-      appStateStore.repositories.bootstrap.getScanPreferences()
-    );
-    const scanPreferencesStore = createMemoryScanPreferencesStore(memmyConfigPath);
-
     const permissionManager = createPermissionManager({
       appStateStore,
       runtimeToken: options.localToken
     });
     const memoryClient = options.memoryClient ?? createDefaultMemoryClient(process.env);
+    const scanPreferencesStore = createMemoryScanPreferencesStore(memmyConfigPath, memoryClient);
     const memoryConfigReload = options.memoryReady
       ? options.memoryReady.then(() => memoryClient.reloadConfig({ reason: "desktop_startup" }))
       : memoryClient.reloadConfig({ reason: "desktop_startup" });

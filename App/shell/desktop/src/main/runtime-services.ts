@@ -374,6 +374,13 @@ export async function preparePackagedRuntimeConfig(
     setMissing(storage, "backend", "sqlite");
     setMissing(storage, "sqlitePath", memoryDatabasePath);
     setMissing(storage, "endpoint", DEFAULT_MEMORY_URL);
+    // A standalone memory service scans known Agents by default; one launched
+    // by Memmy Desktop must wait for the onboarding answer. Only missing keys
+    // are filled, so an answer already recorded (or a Viewer edit) survives.
+    const agentAccess = ensureRecord(memmyMemory, "agentAccess");
+    setMissing(agentAccess, "autoScanKnownAgents", false);
+    setMissing(agentAccess, "watchFileChanges", false);
+    setMissing(agentAccess, "autoInjectSkill", false);
     setMissing(websocket, "host", LOCAL_HOST);
     setMissing(websocket, "port", DEFAULT_AGENT_WEBSOCKET_PORT);
     if (shouldFillMissingAgentSecret && !stringValue(websocket.tokenIssueSecret) && !stringValue(websocket.token)) {

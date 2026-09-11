@@ -106,6 +106,8 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   const showScanProgress = isScanning || scanStopped;
   const hasDeterminateScanProgress = Boolean(scanProgress && scanProgress.phase !== "scan" && scanProgress.phase !== "stopped" && scanProgress.total > 0);
   const memoryUnavailable = memoryServiceStatus === "unavailable";
+  // Switch writes go through the memory service; hold them until it answers.
+  const scanPreferencesLocked = memoryServiceStatus !== "ok";
   const visibleSources = visibleAgentSources(state.agentSources.items);
   const connectedNames = new Set(visibleSources.map((source) => source.displayName.trim().toLocaleLowerCase()));
   const scanPercent = scanProgress && hasDeterminateScanProgress ? formatActiveScanPercent(scanProgress.current, scanProgress.total) : 0;
@@ -145,6 +147,28 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
 
     void refreshMemoryServiceHealth();
   }, [clients]);
+
+  // The scan switches are written by the memory service, so their enabled
+  // state follows its reachability, not the mount-time probe. Re-probe quietly
+  // (no "checking" flash) and pause while a restart is in flight.
+  useEffect(() => {
+    if (!clients || memoryServiceBusy) return;
+    let active = true;
+    const probe = () => {
+      void clients.memoryRuntime.health()
+        .then((health) => {
+          if (active) setMemoryServiceStatus(health.ok && health.storage.ready ? "ok" : "unavailable");
+        })
+        .catch(() => {
+          if (active) setMemoryServiceStatus("unavailable");
+        });
+    };
+    const timer = window.setInterval(probe, 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [clients, memoryServiceBusy]);
 
   useEffect(() => {
     if (!clients) {
@@ -971,11 +995,15 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
           <Settings2 size={14} className="text-text-ink/60" />
           <span className="text-sm font-medium text-text-ink/75">{t("memory.preferences")}</span>
         </div>
+        {scanPreferencesLocked && (
+          <p className="text-xs text-text-ink/50 mb-2">{t("memory.preferencesLocked")}</p>
+        )}
         <div className="space-y-1">
           <ToggleRow
             label={t("memory.startupScan")}
             description={t("memory.startupScanDescription")}
             checked={state.agentSources.scanPreferences.autoScanKnownAgents}
+            disabled={scanPreferencesLocked}
             onChange={(checked) => updateScanPreferences({ autoScanKnownAgents: checked })}
           />
           <Divider />
@@ -983,6 +1011,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
             label={t("memory.scheduledScan")}
             description={t("memory.scheduledScanDescription")}
             checked={state.agentSources.scanPreferences.watchFileChanges}
+            disabled={scanPreferencesLocked}
             onChange={(checked) => updateScanPreferences({ watchFileChanges: checked })}
           />
           <Divider />
@@ -990,6 +1019,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
             label={t("memory.autoInject")}
             description={t("memory.autoInjectDescription")}
             checked={state.agentSources.scanPreferences.autoInjectSkill}
+            disabled={scanPreferencesLocked}
             onChange={(checked) => updateScanPreferences({ autoInjectSkill: checked })}
           />
         </div>
@@ -1773,9 +1803,15 @@ function formatScanProgressTitleKey(phase: AgentSourceScanProgress["phase"]): Me
  * @param props.onChange The state-change callback.
  * @returns The toggle row node.
  */
-function ToggleRow(props: { label: string; description: string; checked: boolean; onChange: (checked: boolean) => void }) {
+function ToggleRow(props: {
+  label: string;
+  description: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (checked: boolean) => void;
+}) {
   return (
-    <div className="flex items-center justify-between py-2.5">
+    <div className={`flex items-center justify-between py-2.5 ${props.disabled ? "opacity-50" : ""}`}>
       <div className="flex-1 pr-4">
         <div className="text-sm text-text-ink/70">{props.label}</div>
         <div className="text-xs text-text-ink/50 leading-relaxed">{props.description}</div>
@@ -1784,8 +1820,9 @@ function ToggleRow(props: { label: string; description: string; checked: boolean
         type="button"
         role="switch"
         aria-checked={props.checked}
+        disabled={props.disabled}
         onClick={() => props.onChange(!props.checked)}
-        className={`relative inline-flex shrink-0 h-5 w-9 items-center rounded-full border-0 p-0 cursor-pointer transition-colors ${props.checked ? "bg-action-sky" : "bg-border-stone"}`}
+        className={`relative inline-flex shrink-0 h-5 w-9 items-center rounded-full border-0 p-0 transition-colors ${props.disabled ? "cursor-not-allowed" : "cursor-pointer"} ${props.checked ? "bg-action-sky" : "bg-border-stone"}`}
       >
         <span className={`inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${props.checked ? "translate-x-[18px]" : "translate-x-0.5"}`} />
       </button>

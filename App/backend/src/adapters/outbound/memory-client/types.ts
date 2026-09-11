@@ -14,6 +14,8 @@ import type {
   MemoryApiLogsInput,
   MemoryApiLogsOutput,
   MemoryHealthSnapshot,
+  MemoryPatchConfigInput,
+  MemoryPatchConfigOutput,
   MemoryProcessingStatusOutput,
   MemoryReloadConfigInput,
   MemoryReloadConfigOutput,
@@ -43,6 +45,8 @@ export interface MemoryRequestContext {
 export interface MemoryClient {
   health(): Promise<MemoryHealthSnapshot>;
   reloadConfig(input?: MemoryReloadConfigInput): Promise<MemoryReloadConfigOutput>;
+  /** Edits memory-service-owned config sections; the service writes the YAML and reloads itself. */
+  patchConfig(input: MemoryPatchConfigInput): Promise<MemoryPatchConfigOutput>;
   exportBundle?(): Promise<Record<string, unknown>>;
   clearAllData?(): Promise<{ ok: true; clearedAt: string; cleared: Record<string, number> }>;
 

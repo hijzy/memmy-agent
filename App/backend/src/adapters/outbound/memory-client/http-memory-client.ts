@@ -10,6 +10,7 @@ import {
   GetMemoryOutputSchema,
   MemoryApiLogsOutputSchema,
   MemoryHealthSnapshotSchema,
+  MemoryPatchConfigOutputSchema,
   MemoryProcessingStatusOutputSchema,
   MemoryReloadConfigOutputSchema,
   RecallEvidenceOutputSchema,
@@ -56,13 +57,14 @@ export function createHttpMemoryClient(
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
 
   async function request<Output>(
-    method: "GET" | "POST" | "DELETE",
+    method: "GET" | "POST" | "PATCH" | "DELETE",
     pathKey: PathKey,
     responseSchema: ZodType<Output>,
     requestOptions: {
       body?: unknown;
       params?: Readonly<Record<string, string>>;
       query?: Readonly<Record<string, unknown>>;
+      headers?: Readonly<Record<string, string>>;
       signal?: AbortSignal;
       timeoutMs?: number;
       maxRetries?: number;
@@ -81,7 +83,8 @@ export function createHttpMemoryClient(
             ...(hasBody ? { "content-type": "application/json" } : {}),
             "x-memmy-time-zone": normalizeTimeZoneOffset(requestOptions.context?.timeZone),
             ...(requestOptions.context?.userId ? { "x-memmy-user-id": requestOptions.context.userId } : {}),
-            authorization: `Bearer ${config.token}`
+            authorization: `Bearer ${config.token}`,
+            ...requestOptions.headers
           },
           body: hasBody ? JSON.stringify(requestOptions.body) : undefined,
           signal: combineAbortSignals(timeoutSignal, requestOptions.signal)
@@ -126,6 +129,16 @@ export function createHttpMemoryClient(
 
     async reloadConfig(input = {}) {
       return request("POST", "reloadConfig", MemoryReloadConfigOutputSchema, { body: input });
+    },
+
+    async patchConfig(input) {
+      // The config route belongs to the memory service's local Viewer API,
+      // which rejects state-changing requests without this marker header
+      // (its CSRF guard, not an auth token).
+      return request("PATCH", "patchConfig", MemoryPatchConfigOutputSchema, {
+        body: { config: input },
+        headers: { "x-memmy-viewer": "1" }
+      });
     },
 
     async exportBundle() {

@@ -150,7 +150,7 @@ describe("2026-06-09 prototype modals", () => {
     expect(onboardingSource).toContain("function returnToScanPermission()");
     expect(onboardingSource).toContain('scanPermission: "unset"');
     expect(onboardingSource).toContain("setFirstScanStep(null)");
-    expect(onboardingSource).toContain("updateScanPreferences(preferences)");
+    expect(onboardingSource).not.toContain("updateScanPreferences(");
     expect(onboardingSource).toContain("<MemoryPluginConflictModal");
     expect(onboardingSource).toContain("onBack={returnToScanPermission}");
     expect(onboardingSource).toContain("resolving={pluginConflictResolving}");
