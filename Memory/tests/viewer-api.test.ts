@@ -327,6 +327,53 @@ describe("local Viewer API", () => {
     expect(scan.status).toBe(202);
   });
 
+  /**
+   * Memmy Desktop no longer reads other Agents' history itself; it asks for a
+   * sample and for one conversation, and both answers come from here.
+   */
+  it("samples recent Agent history and reads one conversation for the first-login report", async () => {
+    const calls: unknown[][] = [];
+    const record = <Result>(name: string, result: Result) => async (...args: unknown[]) => {
+      calls.push([name, ...args]);
+      return result;
+    };
+    const sample = {
+      sourceId: "codex",
+      displayName: "Codex",
+      recentSessionCount: 2,
+      latestActivityAt: "2026-08-28T01:00:00.000Z",
+      queries: [{
+        sourceId: "codex", conversationId: "c-1", messageId: "m-1",
+        createdAt: "2026-08-28T01:00:00.000Z", text: "帮我把扫描下沉到记忆服务", workspacePath: "/repo"
+      }],
+      errors: []
+    };
+    const conversation = { ...sample.queries[0]!, displayName: "Codex", latestActivityAt: "2026-08-28T01:00:00.000Z", messages: [] };
+    const fixture = await startFixture({
+      agentSourceExecutor: stubExecutor({
+        sampleOnboarding: record("sample", { samples: [sample] }),
+        readOnboardingConversation: record("conversation", { conversation })
+      })
+    });
+
+    const samples = await viewerFetch(fixture.baseUrl, "/api/v1/agent-sources/onboarding/samples", {
+      method: "POST",
+      body: JSON.stringify({ maxQueries: 4 })
+    });
+    const window = await viewerFetch(fixture.baseUrl, "/api/v1/agent-sources/onboarding/conversation", {
+      method: "POST",
+      body: JSON.stringify({ sourceId: "codex", conversationId: "c-1" })
+    });
+
+    expect([samples.status, window.status]).toEqual([200, 200]);
+    expect(await samples.json()).toEqual({ samples: [sample] });
+    expect(await window.json()).toEqual({ conversation });
+    expect(calls).toEqual([
+      ["sample", { maxQueries: 4 }],
+      ["conversation", { sourceId: "codex", conversationId: "c-1" }]
+    ]);
+  });
+
   it("reports competing memory plugins to the Viewer", async () => {
     const conflict = {
       sourceId: "openclaw",
@@ -640,6 +687,8 @@ function stubExecutor(overrides: Partial<AgentSourceExecutor> = {}): AgentSource
     cancelScan: async () => ({ ok: true }),
     mutateConnection: async () => ({ ok: true }),
     detectPluginConflicts: async () => ({ conflicts: [] }),
+    sampleOnboarding: async () => ({ samples: [] }),
+    readOnboardingConversation: async () => ({ conversation: null }),
     addManualSource: unexpected("addManualSource"),
     updateManualSource: unexpected("updateManualSource"),
     removeManualSource: unexpected("removeManualSource"),

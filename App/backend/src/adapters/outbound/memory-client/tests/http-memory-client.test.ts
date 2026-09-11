@@ -49,6 +49,8 @@ describe("HttpMemoryClient", () => {
       "/api/v1/agent-sources/:id/plugin",
       "/api/v1/agent-sources/:id/skill",
       "/api/v1/agent-sources/:id",
+      "/api/v1/agent-sources/onboarding/samples",
+      "/api/v1/agent-sources/onboarding/conversation",
       "/api/v1/agent-sources/:id/import",
       "/api/v1/agent-sources/:id/sync"
     ]);
@@ -149,6 +151,14 @@ describe("HttpMemoryClient", () => {
     await expect(client.importManualAgentSource("manual-1", { mode: "initial_subset", messages: [], final: true }))
       .resolves.toMatchObject({ written: 0 });
     await expect(client.syncManualAgentSource("manual-1")).resolves.toMatchObject({ written: 0 });
+    await expect(client.sampleOnboardingHistory({ maxQueries: 4 })).resolves.toMatchObject({ samples: [] });
+    await expect(client.readOnboardingConversation({
+      sourceId: "codex",
+      displayName: "Codex",
+      conversationId: "conversation-1",
+      latestActivityAt: "2026-08-28T01:00:00.000Z",
+      workspacePath: null
+    })).resolves.toEqual({ conversation: null });
     await expect(client.removeManualAgentSource("manual-1")).resolves.toEqual({ ok: true });
 
     expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
@@ -186,6 +196,8 @@ describe("HttpMemoryClient", () => {
       "PATCH /api/v1/agent-sources/manual-1",
       "POST /api/v1/agent-sources/manual-1/import",
       "POST /api/v1/agent-sources/manual-1/sync",
+      "POST /api/v1/agent-sources/onboarding/samples",
+      "POST /api/v1/agent-sources/onboarding/conversation",
       "DELETE /api/v1/agent-sources/manual-1"
     ]);
     expect(requests.every((request) => request.authorization === "Bearer memory-token")).toBe(true);
@@ -232,8 +244,12 @@ describe("HttpMemoryClient", () => {
       "PATCH /api/v1/agent-sources/manual-1",
       "POST /api/v1/agent-sources/manual-1/import",
       "POST /api/v1/agent-sources/manual-1/sync",
+      "POST /api/v1/agent-sources/onboarding/samples",
+      "POST /api/v1/agent-sources/onboarding/conversation",
       "DELETE /api/v1/agent-sources/manual-1"
     ]);
+    expect(requests.find((request) => request.path === "/api/v1/agent-sources/onboarding/samples")?.body)
+      .toEqual({ maxQueries: 4 });
     expect(requests.find((request) => request.path === "/api/v1/agent-sources/scan")?.body)
       .toEqual({ sourceId: "all", mode: "incremental", origin: "app" });
     expect(requests.find((request) => request.path === "/api/v1/memory/add")?.body).toMatchObject({
@@ -584,6 +600,8 @@ function agentSourceFixtureFor(method: string, path: string): unknown {
     return { items: [], nextCursor: null };
   }
   if (method === "GET" && path === "/api/v1/agent-sources/plugin-conflicts") return { conflicts: [] };
+  if (method === "POST" && path === "/api/v1/agent-sources/onboarding/samples") return { samples: [] };
+  if (method === "POST" && path === "/api/v1/agent-sources/onboarding/conversation") return { conversation: null };
   if (method === "POST" && path === "/api/v1/agent-sources/cursor/plugin") {
     return { ok: true, sourceId: "cursor", status: "plugin_installed" };
   }

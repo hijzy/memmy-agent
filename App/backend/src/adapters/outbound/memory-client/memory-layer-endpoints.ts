@@ -36,6 +36,8 @@ export const MEMORY_LAYER_PATHS = Object.freeze({
   agentSourcePlugin: "/api/v1/agent-sources/:id/plugin",
   agentSourceSkill: "/api/v1/agent-sources/:id/skill",
   agentSource: "/api/v1/agent-sources/:id",
+  agentSourceOnboardingSamples: "/api/v1/agent-sources/onboarding/samples",
+  agentSourceOnboardingConversation: "/api/v1/agent-sources/onboarding/conversation",
   agentSourceImport: "/api/v1/agent-sources/:id/import",
   agentSourceSync: "/api/v1/agent-sources/:id/sync"
 } as const);

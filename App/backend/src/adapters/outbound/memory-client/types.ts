@@ -26,6 +26,8 @@ import type {
   MemoryApiLogsInput,
   MemoryApiLogsOutput,
   MemoryHealthSnapshot,
+  MemoryOnboardingConversationOutput,
+  MemoryOnboardingSampleOutput,
   MemoryPatchConfigInput,
   MemoryPatchConfigOutput,
   MemoryProcessingStatusOutput,
@@ -114,6 +116,27 @@ export interface MemoryClient {
     method: "POST" | "DELETE";
   }): Promise<MemoryAgentSourceConnectionOutput>;
   detectAgentSourcePluginConflicts(): Promise<AgentSourceMemoryPluginConflictsResponse>;
+  /**
+   * The first-login report reads other Agents' recent history, which only the
+   * memory service does. It samples every Agent, then asks for the newest
+   * conversation it found.
+   */
+  sampleOnboardingHistory(
+    input: { maxQueries?: number; maxQueryChars?: number; deadlineMs?: number },
+    context?: { signal?: AbortSignal; timeoutMs?: number }
+  ): Promise<MemoryOnboardingSampleOutput>;
+  readOnboardingConversation(
+    input: {
+      sourceId: string;
+      displayName: string;
+      conversationId: string;
+      latestActivityAt: string;
+      workspacePath: string | null;
+      maxQueryChars?: number;
+      deadlineMs?: number;
+    },
+    context?: { signal?: AbortSignal; timeoutMs?: number }
+  ): Promise<MemoryOnboardingConversationOutput>;
   addManualAgentSource(input: AddManualInput): Promise<AgentSourceView>;
   updateManualAgentSource(sourceId: string, input: ManagedAgentSourceUpdateInput): Promise<AgentSourceView>;
   removeManualAgentSource(sourceId: string): Promise<OkResponse>;

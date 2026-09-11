@@ -565,6 +565,59 @@ export const MemoryAgentSourceConnectionOutputSchema = z.object({
 });
 export type MemoryAgentSourceConnectionOutput = z.infer<typeof MemoryAgentSourceConnectionOutputSchema>;
 
+/**
+ * The first-login report is written from a shallow read of the Agents' recent
+ * history. Reading that history belongs to the memory service, so Desktop asks
+ * for a sample and for the newest conversation instead of opening the files.
+ */
+
+export const OnboardingSampledQuerySchema = z.object({
+    sourceId: z.string().min(1),
+    conversationId: z.string().min(1),
+    messageId: z.string().min(1),
+    createdAt: z.string(),
+    text: z.string(),
+    workspacePath: z.string().nullable()
+});
+export type OnboardingSampledQuery = z.infer<typeof OnboardingSampledQuerySchema>;
+
+export const OnboardingSampledMessageSchema = OnboardingSampledQuerySchema.extend({
+    role: z.enum(["user", "assistant", "tool"])
+});
+export type OnboardingSampledMessage = z.infer<typeof OnboardingSampledMessageSchema>;
+
+export const OnboardingSampleResultSchema = z.object({
+    sourceId: z.string().min(1),
+    displayName: z.string().min(1),
+    recentSessionCount: z.number().int().nonnegative(),
+    latestActivityAt: z.string().nullable(),
+    queries: z.array(OnboardingSampledQuerySchema).default([]),
+    /** Recent visible messages, used only to identify the newest conversation. */
+    recentMessages: z.array(OnboardingSampledMessageSchema).optional(),
+    errors: z.array(z.object({ target: z.string(), reason: z.string() })).default([])
+});
+export type OnboardingSampleResult = z.infer<typeof OnboardingSampleResultSchema>;
+
+export const OnboardingConversationWindowSchema = z.object({
+    sourceId: z.string().min(1),
+    displayName: z.string().min(1),
+    conversationId: z.string().min(1),
+    latestActivityAt: z.string(),
+    workspacePath: z.string().nullable(),
+    messages: z.array(OnboardingSampledMessageSchema).default([])
+});
+export type OnboardingConversationWindow = z.infer<typeof OnboardingConversationWindowSchema>;
+
+export const MemoryOnboardingSampleOutputSchema = z.object({
+    samples: z.array(OnboardingSampleResultSchema).default([])
+});
+export type MemoryOnboardingSampleOutput = z.infer<typeof MemoryOnboardingSampleOutputSchema>;
+
+export const MemoryOnboardingConversationOutputSchema = z.object({
+    conversation: OnboardingConversationWindowSchema.nullable()
+});
+export type MemoryOnboardingConversationOutput = z.infer<typeof MemoryOnboardingConversationOutputSchema>;
+
 /** Schema for scan preferences. */
 export const ScanPreferencesSchema = z.object({
     autoScanKnownAgents: z.boolean(),

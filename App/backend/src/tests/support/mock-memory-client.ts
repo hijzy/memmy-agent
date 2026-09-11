@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import {
   MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH,
   type AgentSourceView,
+  type OnboardingConversationWindow,
+  type OnboardingSampleResult,
   type MemoryAgentSourceScanStatus,
   type MemoryHealthSnapshot,
   type MemoryKind
@@ -19,6 +21,9 @@ export interface CreateMockMemoryClientOptions {
   failureRate?: number;
   /** Agent sources the memory service reports as detected. */
   agentSources?: readonly AgentSourceView[];
+  /** Recent-history samples the first-login report reads. */
+  onboardingSamples?: readonly OnboardingSampleResult[];
+  onboardingConversation?: OnboardingConversationWindow | null;
 }
 
 /** Creates create mock memory client. */
@@ -396,6 +401,16 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
     async detectAgentSourcePluginConflicts() {
       failIfNeeded();
       return { conflicts: [] };
+    },
+
+    async sampleOnboardingHistory() {
+      failIfNeeded();
+      return { samples: options.onboardingSamples ?? [] };
+    },
+
+    async readOnboardingConversation() {
+      failIfNeeded();
+      return { conversation: options.onboardingConversation ?? null };
     },
 
     async addManualAgentSource(input) {

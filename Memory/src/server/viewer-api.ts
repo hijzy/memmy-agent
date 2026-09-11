@@ -52,6 +52,8 @@ export const VIEWER_API_ROUTES = [
   "POST /api/v1/agent-sources/:id/skill",
   "DELETE /api/v1/agent-sources/:id/skill",
   "GET /api/v1/agent-sources/plugin-conflicts",
+  "POST /api/v1/agent-sources/onboarding/samples",
+  "POST /api/v1/agent-sources/onboarding/conversation",
   "POST /api/v1/agent-sources/manual",
   "PATCH /api/v1/agent-sources/:id",
   "DELETE /api/v1/agent-sources/:id",
@@ -263,6 +265,14 @@ export async function routeViewerRequest(
         method
       )
     };
+  }
+  // Both read; they are POST because the caller sends the sampling budget and
+  // the conversation to read, not because they change anything.
+  if (method === "POST" && path === "/api/v1/agent-sources/onboarding/samples") {
+    return { body: await context.agentSources.sampleOnboarding(body) };
+  }
+  if (method === "POST" && path === "/api/v1/agent-sources/onboarding/conversation") {
+    return { body: await context.agentSources.readOnboardingConversation(body) };
   }
   if (method === "POST" && path === "/api/v1/agent-sources/manual") {
     return { status: 201, body: await context.agentSources.addManualSource(body) };

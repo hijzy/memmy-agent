@@ -44,6 +44,12 @@ import {
 } from "@memmy/agent-source-core";
 import { openMemoryAgentSourceScanStore, type MemoryAgentSourceScanStore } from "./scan-store.js";
 import {
+  createOnboardingSampleService,
+  type OnboardingConversationWindow,
+  type OnboardingSampleResult,
+  type OnboardingSampleService
+} from "./onboarding/index.js";
+import {
   extractManagedAgentHistory,
   selectIncrementalManagedMessages
 } from "./managed-history.js";
@@ -141,6 +147,14 @@ export interface AgentSourceExecutor {
   mutateConnection(sourceId: string, kind: "plugin" | "skill", method: "POST" | "DELETE"): Promise<unknown>;
   /** Reports Agents whose config already holds a competing memory plugin. */
   detectPluginConflicts(): Promise<{ conflicts: MemoryPluginConflict[] }>;
+  /**
+   * Reads a shallow recent-history window from every detected Agent. Memmy
+   * Desktop's first-login report is written from this; reading other Agents'
+   * history is this service's job, so the report asks instead of reading.
+   */
+  sampleOnboarding(input: unknown): Promise<{ samples: OnboardingSampleResult[] }>;
+  /** Reads one conversation, trimmed to what a prompt can carry. */
+  readOnboardingConversation(input: unknown): Promise<{ conversation: OnboardingConversationWindow | null }>;
   /** Registers a user-added Agent whose history format is not yet known. */
   addManualSource(input: unknown): Promise<AgentSourceView>;
   updateManualSource(sourceId: string, input: unknown): Promise<AgentSourceView>;
@@ -235,6 +249,10 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   let activeAutomation: Promise<void> | undefined;
 
   const readState = () => statePromise ??= loadState(statePath);
+  // Built on first use: a service that never serves a first-login report should
+  // not pay for ten samplers resolving their paths.
+  let onboardingSampleService: OnboardingSampleService | undefined;
+  const onboardingSamples = () => onboardingSampleService ??= createOnboardingSampleService({ sourceRegistry: registry });
   const persist = async (state: PersistedState) => writeState(statePath, state);
 
   async function list(): Promise<{ executorAvailable: true; sources: AgentSourceView[] }> {
@@ -876,6 +894,8 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     scanResults,
     mutateConnection,
     detectPluginConflicts,
+    sampleOnboarding: (input) => onboardingSamples().sample(input),
+    readOnboardingConversation: (input) => onboardingSamples().readConversation(input),
     addManualSource,
     updateManualSource,
     removeManualSource,

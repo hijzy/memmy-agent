@@ -13,6 +13,8 @@ import {
   ManagedAgentSourceImportResultSchema,
   MemoryAgentSourceConnectionOutputSchema,
   MemoryAgentSourceListOutputSchema,
+  MemoryOnboardingConversationOutputSchema,
+  MemoryOnboardingSampleOutputSchema,
   MemoryAgentSourceScanAcceptedSchema,
   MemoryAgentSourceScanStatusSchema,
   MemoryApiLogsOutputSchema,
@@ -337,6 +339,26 @@ export function createHttpMemoryClient(
 
     async detectAgentSourcePluginConflicts() {
       return request("GET", "agentSourcePluginConflicts", AgentSourceMemoryPluginConflictsResponseSchema);
+    },
+
+    async sampleOnboardingHistory(input, context = {}) {
+      return request("POST", "agentSourceOnboardingSamples", MemoryOnboardingSampleOutputSchema, {
+        body: input,
+        headers: VIEWER_WRITE_HEADERS,
+        signal: context.signal,
+        timeoutMs: context.timeoutMs,
+        maxRetries: 0
+      });
+    },
+
+    async readOnboardingConversation(input, context = {}) {
+      return request("POST", "agentSourceOnboardingConversation", MemoryOnboardingConversationOutputSchema, {
+        body: input,
+        headers: VIEWER_WRITE_HEADERS,
+        signal: context.signal,
+        timeoutMs: context.timeoutMs,
+        maxRetries: 0
+      });
     },
 
     async addManualAgentSource(input) {
