@@ -9,6 +9,9 @@ export type ToolExecutionContext = {
   abortSignal?: AbortSignal | null;
   toolName?: string;
   callId?: string | null;
+  sessionKey?: string | null;
+  /** The exact model preset selected for the turn that owns this tool call. */
+  modelPreset?: string | null;
   /** Stop this run without asking the model to select another executor. */
   stopTurn?: (message: string) => void;
   reportFileMutation?: (outcome: FileMutationOutcome) => void;

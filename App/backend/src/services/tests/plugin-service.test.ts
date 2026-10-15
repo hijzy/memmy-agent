@@ -1,0 +1,368 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createInMemoryPluginRegistry, type PluginRelease } from "../../adapters/outbound/plugin-registry/index.js";
+import { createAppStateStore, type AppStateStore } from "../../infrastructure/app-state-store/index.js";
+import {
+  createPluginService,
+  type PluginArtifactManager,
+  type PluginRuntimeHost
+} from "../plugin-service.js";
+import type { PluginLocalArtifactService } from "../plugin-local-artifact-service.js";
+
+let root: string | undefined;
+let store: AppStateStore | undefined;
+
+afterEach(() => {
+  store?.close();
+  store = undefined;
+  if (root) rmSync(root, { recursive: true, force: true });
+  root = undefined;
+});
+
+const release = {
+  manifest: {
+    apiVersion: "memmy/v1" as const,
+    id: "com.example.review",
+    name: "Review",
+    version: "1.0.0",
+    runtime: { adapter: "http" as const, config: { baseUrl: "https://plugin.example" } },
+    capabilities: [{
+      id: "run",
+      name: "Run review",
+      description: "Runs a review",
+      inputSchema: { type: "object", required: ["topic"], properties: { topic: { type: "string" } } },
+      outputSchema: { type: "object" },
+      execution: "job" as const
+    }],
+    permissions: [
+      { type: "network" as const, hosts: ["plugin.example"] },
+      { type: "secret" as const, keys: ["api-key"] }
+    ],
+    configSchema: {
+      type: "object",
+      required: ["database"],
+      properties: { database: { type: "string" } },
+      additionalProperties: false
+    }
+  }
+};
+
+function createContext(
+  releases: PluginRelease[] = [release],
+  localArtifactService?: PluginLocalArtifactService
+) {
+  root = mkdtempSync(join(tmpdir(), "memmy-plugin-service-"));
+  store = createAppStateStore({ databasePath: join(root, "app.sqlite") });
+  const runtimeHost: PluginRuntimeHost = {
+    supports: vi.fn(() => true),
+    activate: vi.fn(async () => undefined),
+    deactivate: vi.fn(async () => undefined),
+    async *invoke() {
+      yield { type: "result" as const, output: { ok: true } };
+    },
+    cancel: vi.fn(async () => undefined),
+    respond: vi.fn(async () => undefined)
+  };
+  const artifactManager: PluginArtifactManager = {
+    install: vi.fn(async (pluginRelease) => ({
+      artifactHash: pluginRelease.artifact?.sha256.toLowerCase() ?? null,
+      rootPath: null
+    })),
+    readTextFile: vi.fn(async () => "<main>renderer</main>"),
+    remove: vi.fn(async () => undefined)
+  };
+  const skillManager = {
+    activate: vi.fn(async () => undefined),
+    deactivate: vi.fn(async () => undefined)
+  };
+  return {
+    runtimeHost,
+    artifactManager,
+    skillManager,
+    service: createPluginService({
+      repository: store.repositories.plugins,
+      secretStore: store.secretStore,
+      registry: createInMemoryPluginRegistry(releases),
+      runtimeHost,
+      artifactManager,
+      skillManager,
+      localArtifactService
+    })
+  };
+}
+
+describe("PluginService", () => {
+  it("does not download or reinstall an unchanged installed release on account refresh", async () => {
+    const { service, artifactManager } = createContext();
+    await service.install(release.manifest.id);
+    vi.mocked(artifactManager.install).mockClear();
+    await service.update(release.manifest.id);
+    await service.update(release.manifest.id);
+    expect(artifactManager.install).not.toHaveBeenCalled();
+    expect(service.list()).toHaveLength(1);
+  });
+
+  it("loads a declared renderer from the installed plugin artifact", async () => {
+    const rendererRelease: PluginRelease = {
+      manifest: { ...release.manifest, ui: { renderer: { entry: "ui/index.html", capabilities: ["run"] } } }
+    };
+    const { service, artifactManager } = createContext([rendererRelease]);
+    await service.install(rendererRelease.manifest.id);
+
+    await expect(service.readUi(rendererRelease.manifest.id, "renderer")).resolves.toBe("<main>renderer</main>");
+    expect(artifactManager.readTextFile).toHaveBeenCalledWith(
+      expect.objectContaining({ id: rendererRelease.manifest.id }),
+      "ui/index.html",
+      512 * 1024
+    );
+  });
+
+  it("installs, configures, approves, enables, disables, and uninstalls", async () => {
+    const { service, runtimeHost, artifactManager, skillManager } = createContext();
+    expect((await service.install(release.manifest.id)).state).toBe("pending_approval");
+    expect(() => service.configure(release.manifest.id, { config: {} })).toThrow(/Invalid plugin config/);
+    service.configure(release.manifest.id, {
+      config: { database: "crossref" },
+      secrets: { "api-key": "secret" }
+    });
+    expect((await service.approvePermissions(release.manifest.id, release.manifest.permissions)).state).toBe("installed");
+    expect((await service.enable(release.manifest.id)).state).toBe("active");
+    expect(runtimeHost.activate).toHaveBeenCalledWith(expect.objectContaining({ id: release.manifest.id }), {
+      "api-key": "secret"
+    });
+    expect(skillManager.activate).toHaveBeenCalledWith(expect.objectContaining({ id: release.manifest.id }));
+    expect((await service.disable(release.manifest.id)).state).toBe("disabled");
+    expect(skillManager.deactivate).toHaveBeenCalledWith(release.manifest.id);
+    await service.uninstall(release.manifest.id);
+    expect(service.list()).toEqual([]);
+    expect(artifactManager.remove).toHaveBeenCalled();
+  });
+
+  it("rejects undeclared secrets and permissions", async () => {
+    const { service } = createContext();
+    await service.install(release.manifest.id);
+    expect(() => service.configure(release.manifest.id, {
+      config: { database: "crossref" },
+      secrets: { password: "nope" }
+    })).toThrow(/not declared/);
+    await expect(service.approvePermissions(release.manifest.id, [{
+      type: "network",
+      hosts: ["evil.example"]
+    }])).rejects.toThrow(/did not declare/);
+  });
+
+  it.each(["install", "update"] as const)("rejects a changed artifact digest through %s", async (operation) => {
+    const releases: PluginRelease[] = [{
+      ...release,
+      artifact: { url: "https://plugins.example/review.zip", sha256: "a".repeat(64) }
+    }];
+    const { service } = createContext(releases);
+    await service.install(release.manifest.id);
+    releases.push({
+      ...release,
+      artifact: { url: "https://plugins.example/review.zip", sha256: "b".repeat(64) }
+    });
+
+    await expect(service[operation](release.manifest.id)).rejects.toThrow(/digest changed/);
+  });
+
+  it("rejects a changed manifest for an installed version", async () => {
+    const changed: PluginRelease = { manifest: { ...release.manifest, name: "Changed" } };
+    const releases: PluginRelease[] = [release];
+    const { service } = createContext(releases);
+    await service.install(release.manifest.id);
+    releases.push(changed);
+
+    await expect(service.update(release.manifest.id)).rejects.toThrow(/manifest changed/);
+  });
+
+  it("compares permission scope independently of descriptions and list order", async () => {
+    const declared = [
+      { type: "network" as const, hosts: ["api.example", "cdn.example"], description: "Paper APIs" },
+      { type: "secret" as const, keys: ["api-key", "client-id"], description: "Credentials" }
+    ];
+    const pluginRelease: PluginRelease = {
+      manifest: { ...release.manifest, permissions: declared }
+    };
+    const { service } = createContext([pluginRelease]);
+    await service.install(release.manifest.id);
+
+    expect(await service.approvePermissions(release.manifest.id, [
+      { type: "network", hosts: ["cdn.example", "api.example"] },
+      { type: "secret", keys: ["client-id", "api-key"] }
+    ])).toMatchObject({ state: "installed" });
+  });
+
+  it("marks activation failures without publishing the plugin as active", async () => {
+    const { service, runtimeHost } = createContext();
+    await service.install(release.manifest.id);
+    service.configure(release.manifest.id, {
+      config: { database: "crossref" },
+      secrets: { "api-key": "secret" }
+    });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    vi.mocked(runtimeHost.activate).mockRejectedValueOnce(new Error("offline"));
+    await expect(service.enable(release.manifest.id)).rejects.toThrow(/offline/);
+    expect(service.get(release.manifest.id)).toMatchObject({ state: "failed", lastError: "offline" });
+  });
+
+  it("marks an active plugin failed when a permission change cannot stop its runtime", async () => {
+    const { service, runtimeHost } = createContext();
+    await service.install(release.manifest.id);
+    service.configure(release.manifest.id, {
+      config: { database: "crossref" },
+      secrets: { "api-key": "secret" }
+    });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+    vi.mocked(runtimeHost.deactivate).mockRejectedValueOnce(new Error("busy"));
+
+    await expect(service.approvePermissions(release.manifest.id, [])).rejects.toThrow(/busy/);
+    expect(service.get(release.manifest.id)).toMatchObject({
+      state: "failed",
+      approvedPermissions: release.manifest.permissions,
+      lastError: "busy"
+    });
+  });
+
+  it("invokes only active declared capabilities", async () => {
+    const { service, runtimeHost } = createContext();
+    await service.install(release.manifest.id);
+    service.configure(release.manifest.id, {
+      config: { database: "crossref" },
+      secrets: { "api-key": "secret" }
+    });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+    const events = [];
+    for await (const event of service.invoke({
+      callId: "call-1",
+      pluginId: release.manifest.id,
+      capabilityId: "run",
+      conversationId: "conversation-1",
+      input: {}
+    })) events.push(event);
+    expect(events).toEqual([{ type: "result", output: { ok: true } }]);
+    expect(runtimeHost.invoke).toBeDefined();
+    expect(store!.db.prepare("SELECT outcome, error_code FROM plugin_call_logs WHERE call_id = ?")
+      .get("call-1")).toEqual({ outcome: "success", error_code: null });
+    expect(() => service.configure(release.manifest.id, {
+      config: { database: "pubmed" }
+    })).toThrow(/Disable plugin/);
+  });
+
+  it("rewrites result paths to the copies published in the conversation workspace", async () => {
+    const sourcePath = "/plugin-data/review-1/outputs/review.md";
+    const publishedPath = "/workspace/outputs/com.example.review/review-1/review.md";
+    const localArtifactService: PluginLocalArtifactService = {
+      host: vi.fn(async (_plugin, artifact) => ({ ...artifact, path: publishedPath })),
+      open: vi.fn(async () => ({ path: sourcePath, name: "review.md", mediaType: "text/markdown" })),
+      revokePlugin: vi.fn()
+    };
+    const { service, runtimeHost } = createContext([release], localArtifactService);
+    runtimeHost.invoke = async function* () {
+      yield {
+        type: "artifact",
+        artifact: {
+          id: "review",
+          name: "review.md",
+          mediaType: "text/markdown",
+          uri: "file:///plugin-data/review-1/outputs/review.md"
+        }
+      };
+      yield { type: "result", output: { data: { outputs: [{ path: sourcePath }] } } };
+    };
+    await service.install(release.manifest.id);
+    service.configure(release.manifest.id, {
+      config: { database: "crossref" },
+      secrets: { "api-key": "secret" }
+    });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+
+    const events = [];
+    for await (const event of service.invoke({
+      callId: "call-1",
+      pluginId: release.manifest.id,
+      capabilityId: "run",
+      conversationId: "websocket:chat-1",
+      input: { taskId: "review-1" }
+    })) events.push(event);
+
+    expect(events).toEqual([
+      expect.objectContaining({ type: "artifact", artifact: expect.objectContaining({ path: publishedPath }) }),
+      { type: "result", output: { data: { outputs: [{ path: publishedPath }] } } }
+    ]);
+    expect(localArtifactService.host).toHaveBeenCalledWith(
+      expect.objectContaining({ id: release.manifest.id }),
+      expect.objectContaining({ id: "review" }),
+      { conversationId: "websocket:chat-1", taskId: "review-1", callId: "call-1" }
+    );
+  });
+
+  it("updates an active plugin and reactivates it atomically", async () => {
+    const nextRelease: PluginRelease = {
+      manifest: { ...release.manifest, version: "2.0.0" }
+    };
+    const { service, runtimeHost } = createContext([release, nextRelease]);
+    await service.install(release.manifest.id, "1.0.0");
+    service.configure(release.manifest.id, {
+      config: { database: "crossref" },
+      secrets: { "api-key": "secret" }
+    });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+    expect(await service.update(release.manifest.id, "2.0.0")).toMatchObject({
+      version: "2.0.0",
+      state: "active",
+      config: { database: "crossref" }
+    });
+    expect(runtimeHost.deactivate).toHaveBeenCalledWith(release.manifest.id);
+    expect(runtimeHost.activate).toHaveBeenCalledTimes(2);
+  });
+
+  it("restores the previous active version when an update cannot activate", async () => {
+    const nextRelease: PluginRelease = { manifest: { ...release.manifest, version: "2.0.0" } };
+    const { service, runtimeHost, artifactManager } = createContext([release, nextRelease]);
+    vi.mocked(artifactManager.install).mockImplementation(async (pluginRelease) => ({
+      artifactHash: pluginRelease.manifest.version,
+      rootPath: `/plugins/${pluginRelease.manifest.version}`
+    }));
+    await service.install(release.manifest.id, "1.0.0");
+    service.configure(release.manifest.id, {
+      config: { database: "crossref" },
+      secrets: { "api-key": "secret" }
+    });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+    vi.mocked(runtimeHost.activate).mockRejectedValueOnce(new Error("new version failed"));
+
+    await expect(service.update(release.manifest.id, "2.0.0")).rejects.toThrow(/new version failed/);
+    expect(service.get(release.manifest.id)).toMatchObject({ version: "1.0.0", state: "active" });
+    expect(runtimeHost.activate).toHaveBeenCalledTimes(3);
+    expect(artifactManager.remove).toHaveBeenCalledWith(expect.objectContaining({
+      rootPath: "/plugins/2.0.0"
+    }));
+  });
+
+  it("restores and closes persisted active runtimes without changing their state", async () => {
+    const { service, runtimeHost } = createContext();
+    await service.install(release.manifest.id);
+    service.configure(release.manifest.id, {
+      config: { database: "crossref" },
+      secrets: { "api-key": "secret" }
+    });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+    vi.mocked(runtimeHost.activate).mockClear();
+
+    await service.restoreActive();
+    await service.shutdown();
+
+    expect(runtimeHost.activate).toHaveBeenCalledOnce();
+    expect(runtimeHost.deactivate).toHaveBeenCalledWith(release.manifest.id);
+    expect(service.get(release.manifest.id).state).toBe("active");
+  });
+});

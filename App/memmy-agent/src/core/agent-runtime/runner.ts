@@ -1101,6 +1101,8 @@ export class AgentRunner {
         abortSignal: spec.abortSignal ?? null,
         toolName: call.name,
         callId: call.id ?? null,
+        sessionKey: spec.sessionKey ?? null,
+        modelPreset: spec.actualModelContext?.presetId ?? null,
         stopTurn: (message) => { stopTurn ??= message; },
         reportFileMutation: (outcome) => {
           fileMutationOutcomes.set(path.resolve(outcome.path), {

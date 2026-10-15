@@ -253,6 +253,7 @@ describe("resolveSettingsTabFromHash", () => {
     expect(resolveSettingsTabFromHash("#token-usage")).toBe("tokens");
     expect(resolveSettingsTabFromHash("#token-usage-memory-budget")).toBe("tokens");
     expect(resolveSettingsTabFromHash("#about")).toBe("about");
+    expect(resolveSettingsTabFromHash("#plugins")).toBeNull();
     expect(resolveSettingsTabFromHash("#unknown")).toBeNull();
   });
 });

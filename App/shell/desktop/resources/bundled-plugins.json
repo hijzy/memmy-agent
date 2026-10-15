@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "plugins": [
+    {
+      "id": "literature-review",
+      "version": "0.5.25",
+      "sha256": "86606e9c18d545e74739c595baa12fea401afd2f22b6abcaba84a7d01cb0701c",
+      "releaseFile": "literature-review-0.5.25.release.json"
+    }
+  ]
+}

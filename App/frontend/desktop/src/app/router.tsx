@@ -57,6 +57,7 @@ import { MemoryPage, writeMemorySubPage } from "../pages/memory-page.js";
 import { KnowledgePage } from "../pages/knowledge-page.js";
 import { OnboardingPage } from "../pages/onboarding-page.js";
 import { PetPage } from "../pages/pet-page.js";
+import { PluginSurfacePage } from "../pages/plugin-surface-page.js";
 import { SettingsPage } from "../pages/settings-page.js";
 import { StartupScreen } from "../pages/startup-screen.js";
 import { TokenDetailPage } from "../pages/token-detail-page.js";
@@ -281,9 +282,8 @@ export function AppRouter(props: { onRetry: () => void }) {
 function WindowDragRegion() {
   return (
     <>
-      <div aria-hidden="true" className="window-drag-region" />
-      <div aria-hidden="true" className="window-drag-exclusion window-drag-exclusion--sidebar-toggle" />
-      <div aria-hidden="true" className="window-drag-exclusion window-drag-exclusion--lang-toggle" />
+      <div aria-hidden="true" className="window-drag-region window-drag-region--leading" />
+      <div aria-hidden="true" className="window-drag-region window-drag-region--trailing" />
     </>
   );
 }
@@ -337,6 +337,8 @@ function renderRoute(path: AppRoutePath) {
       return <KnowledgePage />;
     case "/memory-sources":
       return <MemoryPage initialSubPage="sources" />;
+    case "/plugin":
+      return <PluginSurfacePage />;
     case "/settings":
       return <SettingsPage />;
     case "/pet":

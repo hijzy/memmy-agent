@@ -427,7 +427,7 @@ function addPackage(packageKey) {
   if (!packageInfo) {
     throw new Error(`Missing package-lock entry for ${packageKey}`);
   }
-  if (packageInfo.link) {
+  if (packageInfo.link || !packageMatchesTarget(packageInfo, targetCpu)) {
     return;
   }
 
@@ -449,6 +449,32 @@ function addDependency(fromPackageKey, dependencyName, optional) {
     throw new Error(`Cannot resolve ${dependencyName} from ${fromPackageKey || "runtime root"}`);
   }
   addPackage(packageKey);
+}
+
+function packageMatchesTarget(packageInfo, cpu) {
+  return matchesConstraint(packageInfo.os, "darwin") && matchesConstraint(packageInfo.cpu, cpu);
+}
+
+function matchesConstraint(list, actual) {
+  if (!Array.isArray(list) || list.length === 0) {
+    return true;
+  }
+  let matched = false;
+  let hasPositive = false;
+  for (const raw of list) {
+    const negated = raw.startsWith("!");
+    const name = negated ? raw.slice(1) : raw;
+    if (!negated) {
+      hasPositive = true;
+    }
+    if (name === actual) {
+      if (negated) {
+        return false;
+      }
+      matched = true;
+    }
+  }
+  return hasPositive ? matched : true;
 }
 
 function resolvePackageKey(fromPackageKey, dependencyName) {
@@ -979,6 +1005,9 @@ package_step_start "Verify packaged runtime versions"
 node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" \
   --expected "$DESKTOP_VERSION" \
   --runtime-root "$RUNTIME_DIR"
+package_step_start "Prepare bundled first-party plugins"
+node "$ROOT_DIR/scripts/internal/shared/prepare-bundled-plugins.mjs" \
+  "$DESKTOP_DIR/dist/bundled-plugins" --optional
 package_step_start "Prepare bundled embedding model"
 node "$ROOT_DIR/scripts/internal/shared/prepare-embedding-model.mjs" "$EMBEDDING_MODELS_DIR"
 cp -R "$EMBEDDING_MODELS_DIR" "$RUNTIME_DIR/memory/embedding-models"

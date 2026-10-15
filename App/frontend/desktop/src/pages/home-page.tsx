@@ -1,8 +1,9 @@
 /** Home page module. */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
-import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject, type SetStateAction, type UIEvent } from "react";
+import type { AgentGatewayStartupIssue, InstalledPlugin, PluginArtifactRef, PluginCommandContribution, PluginScenarioContribution } from "@memmy/local-api-contracts";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
+import { normalizePluginConversationId, usePluginUi, type PluginRecordingMaterial, type PluginUiCall } from "../app/plugin-ui-context.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, isAccountTokenQuotaExhausted, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
 import {
   MemmyAgentRequestError,
@@ -17,9 +18,11 @@ import {
   type MemmyAgentWebSocketConnection,
   type UploadAgentMediaInput,
   type UploadedAgentMedia,
+  type WorkspaceFilesScope,
   type WebuiSessionTarget
 } from "../api/memmy-agent-client.js";
 import type { AnalyticsEvent } from "../analytics/analytics-events.js";
+import { ApiRequestError } from "../api/http.js";
 import { setAnalyticsModelSource } from "../analytics/analytics-context.js";
 import { buildOnboardingActivationEvent } from "../analytics/onboarding-analytics.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
@@ -36,7 +39,14 @@ import {
 } from "../lib/agent-attachment.js";
 import { encodeAgentImage, type AgentImageMime } from "../lib/agent-image-encode.js";
 import { formatConversationTitleForDisplay } from "../lib/format-conversation-title.js";
+import { toWorkspaceRelativePath } from "../lib/workspace-relative-path.js";
 import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integration-meta.js";
+import {
+  composerFolderReferenceFromFiles,
+  dataTransferHasComposerReference,
+  mergeComposerContextReferences,
+  readComposerReferenceDrag
+} from "../lib/composer-file-reference.js";
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
 import type { AppAction } from "../state/app-actions.js";
 import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
@@ -58,6 +68,7 @@ import {
   filterSlashCommands,
   localizeSlashCommands,
   readRecentSlashCommands,
+  resolveContributionIcon,
   slashQueryFromInput,
   updateRecentSlashCommands,
   writeRecentSlashCommands,
@@ -68,7 +79,17 @@ import { AgentAttachmentCard, splitAgentAttachmentName } from "./agent-file-atta
 import { AgentEnvironmentPanel } from "./agent-environment-panel.js";
 import { AgentGoalBar, type AgentGoalControlRequest } from "./agent-goal-bar.js";
 import { AgentQueuedMessageList } from "./agent-queued-message-list.js";
+import { AgentTaskPlanBar } from "./agent-task-plan-bar.js";
+import { agentOutputSignature, useStalledOutputShimmer } from "./agent-stall-shimmer.js";
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
+import {
+  type AgentQuestionCardPayload,
+  type AgentQuestionResponse,
+} from "./agent-question-card.js";
+import { PluginCapabilityHost, RecordingBarPortalContext, isLegalFlowInteraction, pinnedCapabilityKey, selectRegionPluginCalls, selectVisiblePluginCalls } from "./plugin-capability-host.js";
+import { InterviewRecordingPanel, type RecordingPanelSession } from "./interview-recording-panel.js";
+import { RecordingEntryCard, RecordingEntryPage, useRecordingEntry, type RecordingDeliverFn, type RecordingArchiveEntry } from "./recording-entry.js";
+import { PluginArtifactPreviewPanel } from "./plugin-artifact-preview-panel.js";
 import { AgentWorkspaceContext } from "./agent-workspace-context.js";
 import { AppFrame } from "./app-frame.js";
 import {
@@ -90,9 +111,18 @@ import {
 } from "./first-encounter-task-launch.js";
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
 import { LlmProviderLogo } from "./llm-provider-logo.js";
+import {
+  ComposerHighlightedTextarea,
+  HomeContextChips,
+  type ComposerContextChip
+} from "./home-composer-quick-actions.js";
+import {
+  WorkspaceArtifactPanel
+} from "./workspace-artifact-panel.js";
+import { SHARED_ROW_PRIMARY_RESERVE, useSharedRowWidth } from "./sidebar-resize.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
 import { resolveWorkspaceEnvironmentScope, useWorkspaceEnvironment } from "./use-workspace-environment.js";
-import { ArrowDown, Check, ChevronDown, Folder, Plus as LucidePlus, RotateCw, SlidersHorizontal, Target, X } from "lucide-react";
+import { ArrowDown, ArrowRight, BookOpenText, CalendarCheck2, Check, ChevronDown, Folder, History, PanelRight, Plus as LucidePlus, RotateCw, SlidersHorizontal, SquareSlash, Target, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -103,7 +133,6 @@ const NEW_TASK_MODEL_SCOPE_KEY = "draft-new-task";
 
 const AGENT_WS_SAFE_FRAME_BYTES = 1024 * 1024;
 const COMPOSER_HEIGHT_EPSILON = 2;
-
 export function updateAgentComposerOverlayHeight(
   panel: HTMLElement,
   composer: HTMLElement,
@@ -348,12 +377,380 @@ export function isSingleLineComposerInput(element: HTMLTextAreaElement): boolean
   return element.scrollHeight <= singleLineHeight + COMPOSER_HEIGHT_EPSILON;
 }
 
+/** Adds a selected capability block without replacing the user's draft. */
+export function addCapabilityBlockToDraft(command: string, draft: string): string {
+  const existingDraft = draft.trim();
+  return existingDraft ? `${command}  ${existingDraft}` : `${command}  `;
+}
+
+/** Builds a plain suggestion draft; plugin commands are registered dynamically. */
+export function homeSuggestionDraft(text: string): string {
+  return text;
+}
+
+/** Replaces only the trailing slash query, preserving text before it. */
+export function replaceTrailingSlashQuery(input: string, command: string, appendSpace: boolean): string {
+  const suffix = appendSpace ? " " : "";
+  return input.replace(/(^|\s)\/[^\s/]*$/, `$1${command}${suffix}`);
+}
+
+export interface ComposerTextEdit {
+  value: string;
+  caret: number;
+}
+
+/** Inserts a selected capability at the current textarea selection. */
+export function insertCapabilityAtSelection(
+  input: string,
+  command: string,
+  selectionStart: number,
+  selectionEnd = selectionStart
+): ComposerTextEdit {
+  const start = Math.max(0, Math.min(selectionStart, input.length));
+  const end = Math.max(start, Math.min(selectionEnd, input.length));
+  const before = input.slice(0, start);
+  const after = input.slice(end);
+  const leadingSpace = before && !/\s$/.test(before) ? "  " : "";
+  const trailingSpace = /^\s/.test(after) ? " " : "  ";
+  const insertion = `${leadingSpace}${command}${trailingSpace}`;
+  return {
+    value: `${before}${insertion}${after}`,
+    caret: before.length + insertion.length
+  };
+}
+
+/** Replaces the slash query immediately before the caret while preserving following text. */
+export function replaceSlashQueryAtSelection(
+  input: string,
+  command: string,
+  selectionStart: number,
+  selectionEnd = selectionStart,
+  appendSpace = true
+): ComposerTextEdit {
+  const start = Math.max(0, Math.min(selectionStart, input.length));
+  const end = Math.max(start, Math.min(selectionEnd, input.length));
+  const beforeCaret = input.slice(0, start);
+  const match = /(^|\s)\/[^\s/]*$/.exec(beforeCaret);
+  if (!match) {
+    return insertCapabilityAtSelection(input, command, start, end);
+  }
+  const queryStart = (match.index ?? 0) + (match[1]?.length ?? 0);
+  const before = input.slice(0, queryStart);
+  const after = input.slice(end);
+  const suffix = appendSpace ? (/^\s/.test(after) ? " " : "  ") : "";
+  return {
+    value: `${before}${command}${suffix}${after}`,
+    caret: before.length + command.length + suffix.length
+  };
+}
+
 export function isAgentConversationAtBottom(element: Pick<HTMLElement, "scrollTop" | "scrollHeight" | "clientHeight">): boolean {
   return element.scrollTop + element.clientHeight >= element.scrollHeight - AGENT_CONVERSATION_BOTTOM_EPSILON_PX;
 }
 
+export function appendPluginArtifact(draft: string, artifact: PluginArtifactRef): string {
+  const separator = draft && !draft.endsWith("\n") ? "\n" : "";
+  const reference = artifact.path ?? artifact.uri;
+  return `${draft}${separator}${artifact.name.replace(/[\r\n]/g, " ")}: ${reference.replace(/[\r\n]/g, "")}`;
+}
+
+export interface PluginCommandTarget {
+  plugin: InstalledPlugin;
+  command: PluginCommandContribution;
+}
+
+export function collectPluginCommandTargets(plugins: InstalledPlugin[], reserved: Iterable<string> = []): PluginCommandTarget[] {
+  const seen = new Set([...reserved].map((command) => command.toLowerCase()));
+  return plugins.filter((plugin) => plugin.state === "active").flatMap((plugin) => (
+    (plugin.manifest.commands ?? []).flatMap((command) => {
+      if (seen.has(command.command)) return [];
+      seen.add(command.command);
+      return [{ plugin, command }];
+    })
+  ));
+}
+
+/**
+ * Selects the commands a plugin asked to pin above the composer.
+ *
+ * Pinned commands are the ones the user reaches repeatedly and out of order,
+ * where hunting for a slash command each time is the wrong interaction. They
+ * are a shortcut for the same invocation, not a separate path, so they are
+ * drawn from the same targets the slash commands resolve against.
+ *
+ * @param targets Available plugin commands.
+ * @returns Targets whose command declares itself pinned.
+ */
+export function selectPinnedPluginCommands(targets: PluginCommandTarget[]): PluginCommandTarget[] {
+  return targets.filter((target) => target.command.pinned === true);
+}
+
+/**
+ * Selects the command a plugin offered for the conversation top bar.
+ *
+ * The top bar belongs to the conversation, not to any one plugin, so a button
+ * only appears there because a plugin asked for it. Recording an interview is
+ * the case this exists for: it is a place the user works alongside the
+ * conversation rather than a step in it, and it has to stay reachable while
+ * the conversation moves on. When several plugins ask, the first one wins —
+ * two buttons for one slot would leave the user guessing which is which.
+ *
+ * @param targets Available plugin commands.
+ * @returns The target whose command claims the top bar, if any.
+ */
+export function selectTopbarPluginCommand(targets: PluginCommandTarget[]): PluginCommandTarget | null {
+  return targets.find((target) => target.command.topbar === true) ?? null;
+}
+
+/**
+ * Selects the commands the slash palette should list.
+ *
+ * @param targets Available plugin commands.
+ * @returns Targets that have no pinned button standing in for them.
+ */
+export function selectSlashPluginCommands(targets: PluginCommandTarget[]): PluginCommandTarget[] {
+  return targets.filter((target) => target.command.pinned !== true);
+}
+
+/** A scenario card together with the plugin that contributed it. */
+export interface PluginScenarioTarget extends PluginScenarioContribution {
+  pluginId: string;
+}
+
+/**
+ * Collects the scenario entry cards contributed by enabled plugins.
+ *
+ * Only active plugins contribute: a disabled plugin cannot serve the work its
+ * card would start, so offering it would dead-end.
+ *
+ * @param plugins Installed plugins.
+ * @returns Scenario cards to offer on the empty home screen.
+ */
+export function collectPluginScenarios(plugins: InstalledPlugin[]): PluginScenarioTarget[] {
+  return plugins
+    .filter((plugin) => plugin.state === "active")
+    .flatMap((plugin) => (plugin.manifest.scenarios ?? []).map((scenario) => ({ ...scenario, pluginId: plugin.id })));
+}
+
+/**
+ * Fixed buttons above the composer for the commands a plugin pinned.
+ *
+ * Renders nothing when no plugin pinned anything, so the composer keeps its
+ * usual layout for everyone else.
+ */
+export function PinnedPluginCommandBar(props: {
+  targets: PluginCommandTarget[];
+  disabled: boolean;
+  recordingOpen: boolean;
+  onRecordingPress(): void;
+  /** Buttons whose card is on screen, as `pluginId:capabilityId`. */
+  active: ReadonlySet<string>;
+  /** Pressing a button opens its card, or closes the one it already opened. */
+  onPress(target: PluginCommandTarget): void;
+}) {
+  if (props.targets.length === 0) return null;
+  return (
+    <div className="pinned-command-bar">
+      {props.targets.map((target) => {
+        const Icon = target.plugin.id === "legal-labor" && target.command.topbar === true ? Mic : resolveContributionIcon(target.command.icon);
+        // The composer recording entry controls its compact card independently
+        // of the top-bar page and pending material collection calls.
+        const recording = target.command.topbar === true;
+        const open = recording ? props.recordingOpen : props.active.has(`${target.plugin.id}:${target.command.capabilityId}`);
+        return (
+          <button
+            key={`${target.plugin.id}:${target.command.command}`}
+            type="button"
+            disabled={props.disabled}
+            title={target.command.description}
+            className="pinned-command-chip"
+            // These buttons stay on screen while their card is open, so without
+            // this the card and the button that raised it look unrelated.
+            data-open={open ? "true" : undefined}
+            aria-pressed={open}
+            onClick={() => recording ? props.onRecordingPress() : props.onPress(target)}
+          >
+            <Icon size={13} aria-hidden="true" />
+            {target.command.name}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Legal shortcuts belong only to conversations that actually invoked the plugin. */
+export function selectConversationPinnedCommands(targets: PluginCommandTarget[], calls: readonly PluginUiCall[]): PluginCommandTarget[] {
+  const invoked = new Set(calls.map((call) => call.pluginId));
+  return selectPinnedPluginCommands(targets).filter((target) => target.plugin.id !== "legal-labor" || invoked.has(target.plugin.id));
+}
+
+/**
+ * Which pinned buttons currently have a card on screen.
+ *
+ * A pinned call is either the user's own or a skill invocation of a capability
+ * represented by a pinned command. It holds the screen until it finishes or is
+ * closed, so its button is highlighted for exactly that long.
+ */
+export function selectOpenPinnedCapabilities(
+  calls: readonly PluginUiCall[],
+  dismissedCallIds?: ReadonlySet<string>,
+  pinnedCapabilities: ReadonlySet<string> = new Set(),
+  hiddenCallIds?: ReadonlySet<string>
+): Set<string> {
+  const open = new Set<string>();
+  for (const call of calls) {
+    if (call.origin !== "user" && !pinnedCapabilities.has(pinnedCapabilityKey(call))) continue;
+    // Hidden cards keep their calls alive but no longer highlight the button.
+    if (dismissedCallIds?.has(call.callId) || hiddenCallIds?.has(call.callId)) continue;
+    if (call.events.some((event) => event.type === "result" || event.type === "error")) continue;
+    open.add(pinnedCapabilityKey(call));
+  }
+  return open;
+}
+
+/** Finds a pending call to hide or show, including one already hidden. */
+export function selectPinnedToggleCall(
+  calls: readonly PluginUiCall[],
+  pluginId: string,
+  capabilityId: string,
+  dismissedCallIds?: ReadonlySet<string>,
+  pinnedCapabilities: ReadonlySet<string> = new Set()
+): string | null {
+  const prioritized = [...calls.filter((call) => call.origin !== "agent"), ...calls.filter((call) => call.origin === "agent")];
+  for (let index = prioritized.length - 1; index >= 0; index -= 1) {
+    const call = prioritized[index]!;
+    if (pinnedCapabilityKey(call) !== `${pluginId}:${capabilityId}`) continue;
+    if (call.origin !== "user" && !pinnedCapabilities.has(pinnedCapabilityKey(call))) continue;
+    // Explicitly cancelled calls cannot be restored; hidden calls can.
+    if (dismissedCallIds?.has(call.callId)) continue;
+    if (call.events.some((event) => event.type === "result" || event.type === "error")) continue;
+    return call.callId;
+  }
+  return null;
+}
+
+/** A visibility gesture never answers, cancels, or restarts a pending call. */
+export async function pressPinnedPluginCommand(options: {
+  calls: readonly PluginUiCall[];
+  pluginId: string;
+  capabilityId: string;
+  dismissedCallIds?: ReadonlySet<string>;
+  pinnedCapabilities: ReadonlySet<string>;
+  toggleVisibility(callId: string): void;
+  open(): Promise<unknown>;
+  opening?: Set<string>;
+  conversationId?: string;
+}): Promise<void> {
+  const callId = selectPinnedToggleCall(options.calls, options.pluginId, options.capabilityId,
+    options.dismissedCallIds, options.pinnedCapabilities);
+  if (callId) options.toggleVisibility(callId);
+  else {
+    const key = JSON.stringify([options.conversationId ?? null, options.pluginId, options.capabilityId]);
+    if (options.opening?.has(key)) return;
+    options.opening?.add(key);
+    try { await options.open(); } finally { options.opening?.delete(key); }
+  }
+}
+
+/** Closing one step must never hide the next request in the same call. */
+export function pluginInteractionSignature(call: PluginUiCall | undefined): string {
+  return call?.events.filter((event) => event.type === "interaction")
+    .map((event) => event.type === "interaction" ? event.request.interactionId : "").join("\n") ?? "";
+}
+
+export function reconcileHiddenPluginCalls(hidden: Set<string>, hiddenSteps: ReadonlyMap<string, string>, calls: readonly PluginUiCall[]): Set<string> {
+  const next = new Set(hidden);
+  for (const id of hidden) {
+    const call = calls.find((candidate) => candidate.callId === id);
+    if (call?.events.some((event) => event.type === "interaction")
+      && hiddenSteps.get(id) !== pluginInteractionSignature(call)) next.delete(id);
+  }
+  return next.size === hidden.size ? hidden : next;
+}
+
+export function buildLegalDiagnosisContinuation(call: PluginUiCall): string {
+  const result = call.events.find((event) => event.type === "result");
+  const output = result?.type === "result" && result.output && typeof result.output === "object"
+    ? result.output as Record<string, unknown> : {};
+  if (typeof output.sessionId !== "string" || !output.sessionId.trim()) {
+    throw new Error("诊断材料已上传，但未取得诊断会话 ID，请重新打开诊断指引后重试。");
+  }
+  return `/legal-diagnosis 已完成调研，继续已有法律诊断会话，sessionId=${JSON.stringify(output.sessionId)}。`
+    + "请使用这个 sessionId 调用 session-status 核对已上传材料与进度，再继续后续诊断并生成报告。"
+    + "本次是已有会话的继续操作，请跳过 skill 中新建会话的 session-start 步骤，不要再次弹出诊断指引或重复收集材料。";
+}
+
+export function parsePluginCommandInvocation(input: string, targets: PluginCommandTarget[]): {
+  plugin: InstalledPlugin;
+  contribution: PluginCommandContribution;
+  arguments: string;
+} | null {
+  const trimmed = input.trim();
+  const token = trimmed.split(/\s/, 1)[0]?.toLowerCase();
+  const target = targets.find((item) => item.command.command === token);
+  return target ? { plugin: target.plugin, contribution: target.command, arguments: trimmed.slice(target.command.command.length).trim() } : null;
+}
+
+/** Converts an Agent-routed plugin command into an explicit Skill invocation. */
+export function buildAgentRoutedPluginPrompt(input: string, targets: PluginCommandTarget[]): string | null {
+  const invocation = parsePluginCommandInvocation(input, targets);
+  const skillId = invocation?.contribution.agentSkillId;
+  if (!invocation || !skillId) return null;
+  return `$${skillId}${invocation.arguments ? ` ${invocation.arguments}` : ""}`;
+}
+
 export function hasActiveAgentConversation(currentChatId: string | null, messageCount: number): boolean {
   return Boolean(currentChatId) && messageCount > 0;
+}
+
+/**
+ * The files a finished recording contributes to the diagnosis materials card.
+ *
+ * Only the transcript goes in: the diagnosis reads text, and the audio stays
+ * in the recording archive for playback.
+ */
+export function selectRecordingMaterialFiles(entry: RecordingArchiveEntry): PluginRecordingMaterial[] {
+  // A handed-over recording is already on the upload card as its own row.
+  if (entry.handedOver) return [];
+  return (entry.files ?? [])
+    .filter((file) => file.kind !== "audio")
+    .map((file) => ({ ...file, collected: entry.collected === true }));
+}
+
+/**
+ * The recording and transcript files a conversation hands over with its report.
+ *
+ * Oldest first, each recording's audio before its transcript, matching the
+ * order the interviews happened in.
+ */
+export function selectRecordingDeliveryFiles(recordings: readonly RecordingArchiveEntry[], conversationId: string | null): PluginArtifactRef[] {
+  const normalized = normalizePluginConversationId(conversationId);
+  if (!normalized) return [];
+  return recordings
+    .filter((entry) => entry.status !== "transcribing" && entry.status !== "failed"
+      && normalizePluginConversationId(entry.sessionKey) === normalized)
+    .sort((a, b) => a.recordedAt.localeCompare(b.recordedAt))
+    .flatMap((entry) => (entry.files ?? []).map((file) => ({
+      id: `recording:${file.path}`, name: file.name, mediaType: file.mime, uri: file.url, path: file.path
+    })));
+}
+
+/** Keeps the global plugin event stream scoped to the conversation on screen. */
+export function selectPluginCallsForConversation(
+  calls: readonly PluginUiCall[],
+  currentChatId: string | null,
+  currentSessionKey: string | null,
+  draftScopeKey: string
+): PluginUiCall[] {
+  // Once a chat exists its public id is authoritative.  The session key is an
+  // alternate spelling of that same id for Agent-originated events; accepting
+  // an old session key during navigation can briefly render another chat's
+  // pending card.
+  const activeConversationId = currentChatId ?? currentSessionKey ?? draftScopeKey;
+  const normalizedActiveId = normalizePluginConversationId(activeConversationId);
+  if (!normalizedActiveId) return [];
+  return calls.filter((call) => normalizePluginConversationId(call.conversationId) === normalizedActiveId);
 }
 
 export function shouldAcceptAgentStatusResult(input: {
@@ -799,7 +1196,9 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     input.dispatch(agentActions.userMessageQueued({
       chatId,
       content: displayText,
-      media: uploadedAttachments.map((item) => ({ url: item.url, name: item.name, kind: item.kind, path: item.path })),
+      // Upload kinds and chat media kinds are separate vocabularies; anything
+      // the thread cannot render inline is just a file.
+      media: uploadedAttachments.map((item) => ({ url: item.url, name: item.name, kind: item.kind === "image" ? "image" as const : "file" as const, path: item.path })),
       focus,
       clientRequestId,
       ...(capturedTarget ? { target: capturedTarget } : {})
@@ -815,6 +1214,86 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
   return true;
 }
 
+function ComposerCaretMenu(props: {
+  textareaRef: RefObject<HTMLTextAreaElement | null>;
+  containerRef: RefObject<HTMLDivElement | null>;
+  value: string;
+  placement?: "above" | "below";
+  children: ReactNode;
+}) {
+  const [position, setPosition] = useState<{ left: number; top?: number; bottom?: number; width: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const textarea = props.textareaRef.current;
+    const container = props.containerRef.current;
+    if (!textarea || !container) {
+      setPosition(null);
+      return;
+    }
+    const style = window.getComputedStyle(textarea);
+    const fontSize = Number.parseFloat(style.fontSize) || 14;
+    const lineHeight = Number.parseFloat(style.lineHeight) || fontSize * 1.6;
+    const selectionStart = textarea.selectionStart ?? textarea.value.length;
+    const mirror = document.createElement("div");
+    mirror.style.position = "fixed";
+    mirror.style.left = "-10000px";
+    mirror.style.top = "0";
+    mirror.style.visibility = "hidden";
+    mirror.style.pointerEvents = "none";
+    mirror.style.boxSizing = style.boxSizing;
+    mirror.style.width = `${textarea.offsetWidth}px`;
+    mirror.style.padding = style.padding;
+    mirror.style.borderWidth = style.borderWidth;
+    mirror.style.borderStyle = "solid";
+    mirror.style.fontFamily = style.fontFamily;
+    mirror.style.fontSize = style.fontSize;
+    mirror.style.fontStyle = style.fontStyle;
+    mirror.style.fontWeight = style.fontWeight;
+    mirror.style.letterSpacing = style.letterSpacing;
+    mirror.style.lineHeight = style.lineHeight;
+    mirror.style.textAlign = style.textAlign;
+    mirror.style.textIndent = style.textIndent;
+    mirror.style.textTransform = style.textTransform;
+    mirror.style.whiteSpace = "pre-wrap";
+    mirror.style.overflowWrap = "break-word";
+    mirror.style.wordBreak = style.wordBreak;
+    mirror.textContent = textarea.value.slice(0, selectionStart);
+    const caretMarker = document.createElement("span");
+    caretMarker.textContent = "\u200b";
+    mirror.append(caretMarker);
+    document.body.append(mirror);
+    const caretLeft = caretMarker.offsetLeft;
+    const caretTop = caretMarker.offsetTop;
+    mirror.remove();
+
+    const textareaRect = textarea.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    const width = Math.min(360, Math.max(180, container.clientWidth - 16));
+    const desiredLeft = textareaRect.left - containerRect.left + caretLeft - textarea.scrollLeft;
+    const left = Math.max(8, Math.min(desiredLeft, container.clientWidth - width - 8));
+    const caretTopInContainer = textareaRect.top - containerRect.top + caretTop - textarea.scrollTop;
+    if (props.placement === "above") {
+      setPosition({
+        left,
+        bottom: Math.max(8, container.clientHeight - caretTopInContainer + 4),
+        width,
+      });
+    } else {
+      setPosition({ left, top: caretTopInContainer + lineHeight + 4, width });
+    }
+  }, [props.containerRef, props.placement, props.textareaRef, props.value]);
+
+  if (!position) return null;
+  return (
+    <div
+      className="composer-caret-menu"
+      style={{ left: position.left, top: position.top, bottom: position.bottom, width: position.width }}
+    >
+      {props.children}
+    </div>
+  );
+}
+
 /**
  * Renders the chat home page.
  *
@@ -822,6 +1301,12 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
  */
 export function HomePage() {
   const { clients } = useApiClients();
+  const { calls: pluginUiCalls, openSurface, routeChatFeedback, addRecordingMaterials,
+    hiddenCallIds: hiddenPluginCalls, setHiddenCallIds: setHiddenPluginCalls,
+    hiddenInteractionSteps: hiddenPluginSteps, openingCommands: openingPluginCommands,
+    dismissedCallIds: dismissedPluginCalls, setDismissedCallIds: setDismissedPluginCalls,
+    answeredInteractions: answeredPluginInteractions, setAnsweredInteractions: setAnsweredPluginInteractions
+  } = usePluginUi();
   const { state, dispatch } = useAppState();
   const modelWorkspace = createModelWorkspace(state.modelConfig);
   const { language, t } = useTranslation();
@@ -837,13 +1322,30 @@ export function HomePage() {
   const slashCommandsRetryTimerRef = useRef<number | null>(null);
   const slashCommandsAttemptRef = useRef(0);
   const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
+  const [slashPickerOpen, setSlashPickerOpen] = useState(false);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const [selectedComposerCommandsByScope, setSelectedComposerCommandsByScope] = useState<Record<string, typeof COMPOSER_GOAL_COMMAND>>({});
+  const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0 });
   const [recentSlashCommands, setRecentSlashCommands] = useState<string[]>(() => readRecentSlashCommands());
   const [statusPanel, setStatusPanel] = useState<StatusPanelState>({ open: false });
   const [lastCompactionPanel, setLastCompactionPanel] = useState<StatusPanelState>({ open: false });
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
   const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
+  const [previewPanelOpen, setPreviewPanelOpen] = useState(false);
+  const [recordingBarTarget, setRecordingBarTarget] = useState<HTMLDivElement | null>(null);
+  const [previewFocusFile, setPreviewFocusFile] = useState<{ path: string; nonce: number } | null>(null);
+  const [previewFocusExternalFile, setPreviewFocusExternalFile] = useState<{
+    id: string;
+    name: string;
+    nonce: number;
+    load: (signal?: AbortSignal) => Promise<Blob>;
+    open?: () => Promise<void>;
+    reveal?: () => Promise<void>;
+  } | null>(null);
+  const [pluginArtifactPreview, setPluginArtifactPreview] = useState<PluginArtifactRef | null>(null);
+  const [recordingSession, setRecordingSession] = useState<RecordingPanelSession | null>(null);
+  const [installedPlugins, setInstalledPlugins] = useState<InstalledPlugin[]>([]);
+  const [previewPanelWidth, setPreviewPanelWidth] = useState(520);
   const [isCreatingChat, setIsCreatingChat] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [projectPickerOperationId, setProjectPickerOperationId] = useState<string | null>(null);
@@ -856,12 +1358,45 @@ export function HomePage() {
   const [isComposerSingleLine, setIsComposerSingleLine] = useState(true);
   const composerDrafts = state.agent.composerDraftsByScope;
   const pendingAttachmentsByScope = state.agent.composerPendingAttachmentsByScope;
+  const contextReferencesByScope = state.agent.composerContextReferencesByScope;
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerShellRef = useRef<HTMLDivElement | null>(null);
+  const composerAttachMenuRef = useRef<HTMLDetailsElement | null>(null);
+  const composerCapabilityMenuRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const conversationPanelRef = useRef<HTMLElement | null>(null);
+  const conversationContentRef = useRef<HTMLDivElement | null>(null);
   const composerOverlayRef = useRef<HTMLDivElement | null>(null);
+  // The row the chat and the side preview share, so the preview can cap itself
+  // to leave the chat visible instead of covering it.
+  const [workspaceLayoutRef, workspaceLayoutWidth] = useSharedRowWidth<HTMLDivElement>();
   const pendingStatusChatRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const closeAttachMenu = (event: PointerEvent) => {
+      const menu = composerAttachMenuRef.current;
+      if (menu?.open && !menu.contains(event.target as Node)) menu.removeAttribute("open");
+      if (slashPickerOpen && !composerCapabilityMenuRef.current?.contains(event.target as Node)) {
+        setSlashPickerOpen(false);
+        setSlashMenuDismissed(true);
+      }
+    };
+    const closeAttachMenuOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        composerAttachMenuRef.current?.removeAttribute("open");
+        setSlashPickerOpen(false);
+        setSlashMenuDismissed(true);
+      }
+    };
+    document.addEventListener("pointerdown", closeAttachMenu);
+    document.addEventListener("keydown", closeAttachMenuOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeAttachMenu);
+      document.removeEventListener("keydown", closeAttachMenuOnEscape);
+    };
+  }, [slashPickerOpen]);
   const pendingLastCompactionChatRef = useRef<string | null>(null);
   const pendingHistoryDagChatRef = useRef<string | null>(null);
   const lastCompactionRequestIdRef = useRef(0);
@@ -882,7 +1417,98 @@ export function HomePage() {
   const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
   const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
+  // The recording entry in the top bar. Separate from the composer's recorder:
+  // that one dictates into the input box, this one captures an interview and
+  // opens a page for it.
+  //
+  // How a recording reaches the conversation is wired further down, once the
+  // composer's own helpers exist; the hook only needs a stable way to call it.
+  const deliverRecordingRef = useRef<RecordingDeliverFn | undefined>(undefined);
+  const normalRecordingReadyRef = useRef<(entry: RecordingArchiveEntry) => void>(() => undefined);
+  const stageRecordingMaterials = useCallback((entry: RecordingArchiveEntry) => {
+    const files = selectRecordingMaterialFiles(entry);
+    if (entry.sessionKey && files.length) addRecordingMaterials("legal-labor", entry.sessionKey, files);
+  }, [addRecordingMaterials]);
+  const recordingEntry = useRecordingEntry(
+    clients?.asr,
+    clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined,
+    (transcript, mode) => deliverRecordingRef.current?.(transcript, mode),
+    { scope: String(state.account.userId ?? "local"), onArchived: (entry) => { stageRecordingMaterials(entry); normalRecordingReadyRef.current(entry); },
+      // Staged as soon as it stops, as the row for its transcript: the upload
+      // card can be submitted while ASR is still running, and waits for it then.
+      onHandedOver: ({ audio, transcriptName }) => {
+        const sessionKey = state.agent.currentSessionKey ?? (state.agent.currentChatId ? `websocket:${state.agent.currentChatId}` : null);
+        if (!sessionKey) return;
+        addRecordingMaterials("legal-labor", sessionKey, [{
+          kind: "file", path: audio.path, url: audio.url, name: transcriptName, mime: "text/plain", bytes: 0,
+          collected: false, pending: true, pendingAudio: audio
+        }]);
+      },
+      ...((state.agent.currentSessionKey ?? state.agent.currentChatId) ? { sessionKey: state.agent.currentSessionKey ?? `websocket:${state.agent.currentChatId}` } : {}),
+      resolveAudio: async (entry) => {
+        if (!clients || !entry.audioPath) return entry.audioUrl;
+        const result = await clients.memmyAgent.resolveArtifact(entry.audioPath, entry.sessionKey
+          ?? state.agent.currentSessionKey ?? "");
+        return result.media_url ?? null;
+      }
+    }
+  );
+  const archivePluginRecording = useCallback((entry: RecordingArchiveEntry) => {
+    recordingEntry.archive(entry);
+    stageRecordingMaterials(entry);
+  }, [recordingEntry.archive, stageRecordingMaterials]);
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
+  const pluginUiPluginKey = useMemo(() => [...new Set(pluginUiCalls.map((call) => call.pluginId))].sort().join("\n"), [pluginUiCalls]);
+  const visiblePluginCalls = useMemo(
+    () => selectPluginCallsForConversation(pluginUiCalls, state.agent.currentChatId, state.agent.currentSessionKey, chatScopeKey),
+    [chatScopeKey, pluginUiCalls, state.agent.currentChatId, state.agent.currentSessionKey]
+  );
+  const pinnedPluginCapabilities = useMemo(
+    () => new Set(installedPlugins.flatMap((plugin) => (plugin.manifest.commands ?? [])
+      .filter((command) => command.pinned === true)
+      .map((command) => `${plugin.id}:${command.capabilityId}`))),
+    [installedPlugins]
+  );
+  const preparedPluginCalls = useMemo(
+    () => selectVisiblePluginCalls(visiblePluginCalls, answeredPluginInteractions),
+    [visiblePluginCalls, answeredPluginInteractions]
+  );
+  const waitingForPluginInteraction = preparedPluginCalls.some((call) => (
+    call.events.some((event) => event.type === "interaction")
+    && !call.events.some((event) => event.type === "result" || event.type === "error")
+  ));
+  useEffect(() => {
+    setHiddenPluginCalls((current) => {
+      return reconcileHiddenPluginCalls(current, hiddenPluginSteps, preparedPluginCalls);
+    });
+  }, [hiddenPluginSteps, preparedPluginCalls, setHiddenPluginCalls]);
+  const pinnedCardCalls = useMemo(
+    () => selectRegionPluginCalls(preparedPluginCalls, "pinned", pinnedPluginCapabilities),
+    [preparedPluginCalls, pinnedPluginCapabilities]
+  );
+  const legalFlowCardOpen = preparedPluginCalls.some((call) => isLegalFlowInteraction(call) && !dismissedPluginCalls.has(call.callId));
+  const legalGuideOpen = pinnedCardCalls.some((call) => call.pluginId === "legal-labor" && !isLegalFlowInteraction(call)
+    && call.events.some((event) => event.type === "interaction" && event.request.type === "question")
+    && !hiddenPluginCalls.has(call.callId) && !dismissedPluginCalls.has(call.callId));
+  const openPinnedCapabilities = useMemo(
+    () => selectOpenPinnedCapabilities(pinnedCardCalls, dismissedPluginCalls, pinnedPluginCapabilities, hiddenPluginCalls),
+    [dismissedPluginCalls, hiddenPluginCalls, pinnedPluginCapabilities, pinnedCardCalls]
+  );
+  // The recorder is the one card that lives in the side column rather than in
+  // the pinned bar, so the page needs to know whether it is there and what to
+  // call it before it can lay the column out.
+  // A closed card is gone even if its call has not finished unwinding, so the
+  // pane that card opened leaves with it rather than standing empty.
+  const panelRecorders = useMemo(
+    () => selectRegionPluginCalls(preparedPluginCalls, "panel", pinnedPluginCapabilities).filter((call) => !dismissedPluginCalls.has(call.callId)),
+    [dismissedPluginCalls, preparedPluginCalls, pinnedPluginCapabilities]
+  );
+  const panelRecorderTitle = panelRecorders[0]
+    ? installedPlugins
+      .find((plugin) => plugin.id === panelRecorders[0]!.pluginId)
+      ?.manifest.commands?.find((command) => command.capabilityId === panelRecorders[0]!.capabilityId)
+      ?.name ?? null
+    : null;
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
   const modelWorkspaceMode = state.bootstrap?.app.userMode === "byok" ? "byok" : "account";
   const pendingModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey];
@@ -923,6 +1549,17 @@ export function HomePage() {
     setAnalyticsModelSource(resolvedConversationModel.candidate?.source ?? null);
     return () => setAnalyticsModelSource(null);
   }, [resolvedConversationModel.candidate?.source]);
+  useEffect(() => {
+    let active = true;
+    if (!clients) {
+      setInstalledPlugins([]);
+      return () => { active = false; };
+    }
+    void clients.plugins.list()
+      .then((plugins) => { if (active) setInstalledPlugins(plugins); })
+      .catch(() => { if (active) setInstalledPlugins([]); });
+    return () => { active = false; };
+  }, [clients, pluginUiPluginKey]);
   const input = composerDrafts[chatScopeKey] ?? "";
   const composerCommandDraft = resolveComposerCommandDraft(
     input,
@@ -931,10 +1568,38 @@ export function HomePage() {
   const selectedComposerCommand = composerCommandDraft.command;
   const composerInput = composerCommandDraft.text;
   const pendingAttachments = pendingAttachmentsByScope[chatScopeKey] ?? [];
+  const contextChips = (contextReferencesByScope[chatScopeKey] ?? []).filter((reference) => reference.kind === "path");
   const draftTarget = state.agent.draftTargetsByScope[chatScopeKey] ?? { kind: "standalone" as const };
   const selectedDraftProject = draftTarget.kind === "project"
     ? state.agent.projects.find((project) => project.id === draftTarget.projectId) ?? null
     : null;
+  const activeTask = state.agent.currentSessionKey
+    ? state.agent.tasks.find((task) => task.sessionKey === state.agent.currentSessionKey) ?? null
+    : state.agent.currentChatId
+      ? state.agent.tasks.find((task) => task.chatId === state.agent.currentChatId) ?? null
+      : null;
+  const previewSessionKey = state.agent.currentSessionKey ?? activeTask?.sessionKey ?? null;
+  const activeSession = previewSessionKey
+    ? state.agent.sessions.find((session) => session.key === previewSessionKey) ?? null
+    : null;
+  const activeProjectId = activeSession?.projectId ?? activeTask?.projectId ?? null;
+  const activeProject = activeProjectId
+    ? state.agent.projects.find((project) => project.id === activeProjectId) ?? null
+    : null;
+  const previewRootLabel = activeProject?.name
+    ?? selectedDraftProject?.name
+    ?? activeTask?.title
+    ?? t("workspaceArtifact.taskFolder");
+  const previewWorkspaceRoot = activeSession?.cwd
+    ?? activeTask?.cwd
+    ?? activeProject?.rootPath
+    ?? selectedDraftProject?.rootPath
+    ?? null;
+  const previewScope: WorkspaceFilesScope | null = previewSessionKey
+    ? { kind: "session", key: previewSessionKey }
+    : selectedDraftProject
+      ? { kind: "project", key: selectedDraftProject.id }
+      : null;
   const environmentScope = resolveWorkspaceEnvironmentScope(
     state.agent.currentSessionKey,
     selectedDraftProject?.id ?? null,
@@ -955,6 +1620,9 @@ export function HomePage() {
     ? state.agent.queuedMessagesByChatId[state.agent.currentChatId] ?? []
     : [];
   const currentGoal = state.agent.goalState?.goal_id ? state.agent.goalState : null;
+  const currentTaskPlan = state.agent.taskPlanState?.plan_id
+    ? state.agent.taskPlanState
+    : null;
   const isCurrentGoalActive = currentGoal?.status === "active";
   const currentActiveTurnId = state.agent.currentChatId
     ? state.agent.activeTurnIdByChatId[state.agent.currentChatId] ?? null
@@ -972,6 +1640,26 @@ export function HomePage() {
     && !currentQueuedMessages.some((item) => item.status === "steering")
   );
   const hasActiveConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
+
+  useEffect(() => {
+    if (!previewScope) {
+      setPreviewPanelOpen(false);
+      setPluginArtifactPreview(null);
+      setPreviewFocusFile(null);
+      setPreviewFocusExternalFile(null);
+    }
+  }, [previewScope?.kind, previewScope?.key]);
+
+  useEffect(() => {
+    if (!previewPanelOpen && pluginArtifactPreview === null) return;
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  }, [pluginArtifactPreview, previewPanelOpen]);
+
+  useEffect(() => {
+    if (!environmentScope) setEnvironmentPanelOpen(false);
+  }, [environmentScope]);
+
   const activeConversationTitle = state.agent.currentSessionKey
     ? state.agent.tasks.find((task) => task.sessionKey === state.agent.currentSessionKey)?.title.trim() || t("home.title")
     : t("home.title");
@@ -984,9 +1672,82 @@ export function HomePage() {
     return {
       resolveArtifact: (path: string) => client.resolveArtifact(path, sessionKey),
       revealArtifact: (path: string) => client.revealArtifact(path, sessionKey),
-      openArtifact: (path: string) => client.openArtifact(path, sessionKey)
+      openArtifact: (path: string) => client.openArtifact(path, sessionKey),
+      previewArtifact: async (path: string) => {
+        if (!previewScope) return false;
+        let relativePath: string | null = null;
+        let mediaUrl: string | null = null;
+        let artifactName = path.replace(/\\/g, "/").split("/").pop() || path;
+        let artifactPath = path;
+        try {
+          const resolved = await client.resolveArtifact(path, sessionKey);
+          if (resolved.kind === "directory") return false;
+          artifactName = resolved.name || artifactName;
+          artifactPath = resolved.path;
+          mediaUrl = resolved.media_url ?? null;
+          relativePath = resolved.relative_path?.replace(/\\/g, "/")
+            ?? toWorkspaceRelativePath(resolved.path, previewWorkspaceRoot)
+            ?? toWorkspaceRelativePath(path, previewWorkspaceRoot);
+        } catch {
+          relativePath = toWorkspaceRelativePath(path, previewWorkspaceRoot);
+        }
+        if (recordingEntry.open) recordingEntry.close();
+        setPluginArtifactPreview(null);
+        setPreviewPanelOpen(true);
+        if (relativePath) {
+          setPreviewFocusExternalFile(null);
+          setPreviewFocusFile({ path: relativePath, nonce: Date.now() });
+          return true;
+        }
+        if (mediaUrl) {
+          const loadUrl = mediaUrl;
+          setPreviewFocusFile(null);
+          setPreviewFocusExternalFile({
+            id: artifactPath,
+            name: artifactName,
+            nonce: Date.now(),
+            load: async (signal) => {
+              const response = await fetch(loadUrl, { signal });
+              if (!response.ok) throw new Error("media_fetch_failed");
+              return response.blob();
+            },
+            open: () => client.openArtifact(artifactPath, sessionKey),
+            reveal: () => client.revealArtifact(artifactPath, sessionKey)
+          });
+          return true;
+        }
+        return false;
+      }
     };
-  }, [clients?.memmyAgent, state.agent.currentSessionKey]);
+  }, [
+    clients?.memmyAgent,
+    previewScope?.kind,
+    previewScope?.key,
+    previewWorkspaceRoot,
+    recordingEntry.close,
+    recordingEntry.open,
+    state.agent.currentSessionKey
+  ]);
+  const loadPreviewDirectory = useCallback((scope: WorkspaceFilesScope, relativePath: string) => {
+    const client = clients?.memmyAgent;
+    if (!client) return Promise.reject(new Error("agent_client_unavailable"));
+    return client.listWorkspaceFiles(scope, relativePath);
+  }, [clients?.memmyAgent]);
+  const loadWorkspaceFile = useCallback((relativePath: string, signal?: AbortSignal): Promise<Blob> => {
+    const client = clients?.memmyAgent;
+    if (!client || !previewScope) return Promise.reject(new Error("agent_client_unavailable"));
+    return client.readWorkspaceFile(previewScope, relativePath, signal);
+  }, [clients?.memmyAgent, previewScope?.kind, previewScope?.key]);
+  const openWorkspaceFile = useCallback((relativePath: string): Promise<void> => {
+    const client = clients?.memmyAgent;
+    if (!client || !previewScope) return Promise.reject(new Error("agent_client_unavailable"));
+    return client.openWorkspaceFile(previewScope, relativePath);
+  }, [clients?.memmyAgent, previewScope?.kind, previewScope?.key]);
+  const revealWorkspaceFile = useCallback((relativePath: string): Promise<void> => {
+    const client = clients?.memmyAgent;
+    if (!client || !previewScope) return Promise.reject(new Error("agent_client_unavailable"));
+    return client.revealWorkspaceFile(previewScope, relativePath);
+  }, [clients?.memmyAgent, previewScope?.kind, previewScope?.key]);
   const isCurrentAgentRunning = Boolean(
     state.agent.currentChatId &&
     (
@@ -995,6 +1756,17 @@ export function HomePage() {
       state.agent.runStartedAtByChatId[state.agent.currentChatId] ||
       state.agent.optimisticSendingByChatId[state.agent.currentChatId]
     )
+  );
+  // The same condition the sidebar spinner uses, so the thread and the
+  // spinner never disagree about whether Memmy is working.
+  const isAgentWorking = isCurrentAgentRunning || isCurrentGoalActive;
+  // After a few quiet seconds, the shimmer sweeps the last line whether the
+  // Agent is writing an answer, running a tool, or waiting on the user to
+  // act — the common thread is "no new text yet, but still working".
+  useStalledOutputShimmer(
+    conversationContentRef,
+    isAgentWorking,
+    agentOutputSignature(state.agent.messages)
   );
   const workspaceEnvironment = useWorkspaceEnvironment(
     clients?.memmyAgent ?? null,
@@ -1533,11 +2305,183 @@ export function HomePage() {
     argHint: "",
     synthetic: true
   };
-  const slashQuery = slashMenuDismissed ? null : slashQueryFromInput(composerInput);
+  const goalSlashCommand: SlashCommandPaletteItem = {
+    command: COMPOSER_GOAL_COMMAND,
+    title: t("home.command.goalTitle"),
+    description: t("home.command.goalDescription"),
+    icon: "target",
+    argHint: "",
+    synthetic: true
+  };
+  const pluginScenarios = collectPluginScenarios(installedPlugins);
+  const pluginCommandTargets = collectPluginCommandTargets(installedPlugins, [
+    "/stop",
+    "/last-compaction",
+    COMPOSER_GOAL_COMMAND,
+    ...slashCommands.map((command) => command.command)
+  ]);
+  // No plugin, no button: the top bar is the conversation's, and only a plugin
+  // that asked for a place there gets one.
+  const topbarPluginCommand = selectTopbarPluginCommand(selectConversationPinnedCommands(pluginCommandTargets, visiblePluginCalls));
+  const conversationPinnedCommands = selectConversationPinnedCommands(pluginCommandTargets, visiblePluginCalls);
+  const togglePluginCallVisibility = (callId: string) => {
+    setHiddenPluginCalls((current) => {
+      const next = new Set(current);
+      if (next.has(callId)) next.delete(callId);
+      else {
+        hiddenPluginSteps.set(callId, pluginInteractionSignature(preparedPluginCalls.find((call) => call.callId === callId)));
+        next.add(callId);
+      }
+      return next;
+    });
+  };
+  const hidePluginCall = (callId: string) => {
+    hiddenPluginSteps.set(callId, pluginInteractionSignature(preparedPluginCalls.find((call) => call.callId === callId)));
+    setHiddenPluginCalls((current) => new Set(current).add(callId));
+  };
+  const toggleRecordingEntry = () => {
+    setPluginArtifactPreview(null);
+    setPreviewPanelOpen(false);
+    setEnvironmentPanelOpen(false);
+    putRecorderCardAside();
+    recordingEntry.toggle();
+  };
+  const invokePinnedPluginCommand = (target: PluginCommandTarget) => {
+    if (!clients || legalFlowCardOpen) return;
+    recordingEntry.closeCompact();
+    const conversationId = state.agent.currentChatId ?? state.agent.currentSessionKey ?? chatScopeKey;
+    void pressPinnedPluginCommand({
+      calls: visiblePluginCalls,
+      pluginId: target.plugin.id,
+      capabilityId: target.command.capabilityId,
+      dismissedCallIds: dismissedPluginCalls,
+      pinnedCapabilities: pinnedPluginCapabilities,
+      opening: openingPluginCommands,
+      conversationId,
+      toggleVisibility: togglePluginCallVisibility,
+      open: () => clients.plugins.invoke(target.plugin.id, target.command.capabilityId, {
+        conversationId,
+        input: { command: target.command.command, arguments: "", context: { references: [] } },
+        origin: "user"
+      })
+    }).catch((error) => {
+      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "send",
+        message: pluginInvocationError(error),
+        scopeKey: chatScopeKey
+      })));
+    });
+  };
+  const toggleCompactRecording = () => {
+    if (legalFlowCardOpen) return;
+    for (const call of pinnedCardCalls) {
+      if (call.pluginId === "legal-labor" && !isLegalFlowInteraction(call)) hidePluginCall(call.callId);
+    }
+    if (panelRecorders[0]) togglePluginCallVisibility(panelRecorders[0].callId);
+    else recordingEntry.toggleCompact();
+  };
+  const recordingCollectionFlights = useRef(new Set<string>());
+  normalRecordingReadyRef.current = (entry) => {
+    if (!clients || !entry.files?.length || !entry.sessionKey || recordingCollectionFlights.current.has(entry.id)) return;
+    const currentConversation = state.agent.currentSessionKey ?? state.agent.currentChatId;
+    if (!currentConversation || entry.sessionKey.replace(/^websocket:/, "") !== currentConversation.replace(/^websocket:/, "")) return;
+    const legalCalls = visiblePluginCalls.filter((call) => call.pluginId === "legal-labor");
+    const pendingLegalCalls = preparedPluginCalls.filter((call) => call.pluginId === "legal-labor");
+    if (!legalCalls.length) return;
+    recordingEntry.closeCompact();
+    if (pendingLegalCalls.some(isLegalFlowInteraction)) return;
+    recordingCollectionFlights.current.add(entry.id);
+    const guides = pendingLegalCalls.filter((call) => !call.events.some((event) => event.type === "result" || event.type === "error")
+      && call.events.some((event) => event.type === "interaction" && event.request.type === "question"
+        && Array.isArray((event.request.payload as { options?: unknown[] })?.options)
+        && (event.request.payload as { options: Array<{ value?: string }> }).options.some((option) => option.value === "upload")));
+    const collect = async () => {
+      if (guides.length) {
+        await Promise.all(guides.map(async (call) => {
+          const event = call.events.find((item) => item.type === "interaction" && item.request.type === "question");
+          if (event?.type !== "interaction") return;
+          await clients.plugins.respond(call.pluginId, call.callId, event.request.interactionId, "upload");
+          rememberPluginInteraction(`${call.pluginId}:${call.callId}:${event.request.interactionId}`);
+        }));
+      } else {
+        const sessionResult = [...legalCalls].reverse().flatMap((call) => call.events).find((event) => event.type === "result"
+          && typeof (event.output as { sessionId?: unknown })?.sessionId === "string");
+        const sessionId = sessionResult?.type === "result" ? (sessionResult.output as { sessionId: string }).sessionId : undefined;
+        if (!sessionId) return;
+        await clients.plugins.invoke("legal-labor", "material-collect", {
+          conversationId: currentConversation, origin: "user", input: { sessionId, mode: "upload", append: true }
+        });
+      }
+    };
+    void collect().catch((error) => {
+      recordingCollectionFlights.current.delete(entry.id);
+      dispatch(agentActions.operationFailed("chat", createAgentOperationError({ source: "send", message: pluginInvocationError(error), scopeKey: chatScopeKey })));
+    });
+  };
+  const generateLegalDiagnosis = async (call: PluginUiCall) => {
+    if (!clients) return;
+    try {
+      if (preparedPluginCalls.some((pending) => pending.pluginId === call.pluginId && pending.origin === "agent"
+        && pending.events.some((event) => event.type === "interaction")
+        && !pending.events.some((event) => event.type === "result" || event.type === "error"))) {
+        throw new Error("材料已保存，当前 Agent 仍在等待另一张诊断卡片。请先完成该卡片，或停止当前任务后继续已有诊断会话。");
+      }
+      if (resolvedConversationModel.unavailable) throw new Error(t("home.modelSelector.unavailable"));
+      if (resolvedConversationModel.candidate?.source === "platform" && isAccountTokenQuotaExhausted(state.bootstrap)) {
+        throw new Error(t("agent.error.quotaExceeded"));
+      }
+      const sent = await submitAgentComposerMessage({
+        chatId: state.agent.currentChatId,
+        target: state.agent.currentChatId ? null : draftTarget,
+        connection,
+        ensureChatSubscription,
+        content: buildAgentRoutedPluginPrompt(buildLegalDiagnosisContinuation(call), pluginCommandTargets)
+          ?? buildLegalDiagnosisContinuation(call).replace("/legal-diagnosis", "$labor-risk-diagnosis"),
+        displayContent: t("plugin.ui.generateDiagnosis"),
+        language,
+        pendingAttachments: [],
+        uploadAgentMedia: (attachments) => clients.memmyAgent.uploadAgentMedia(attachments),
+        dispatch, track,
+        setCreatingChat: setIsCreatingChat,
+        clearComposer: () => undefined,
+        chatSelectionEpoch: state.agent.chatSelectionEpoch,
+        getChatSelectionEpoch: () => chatSelectionEpochRef.current,
+        scopeKey: chatScopeKey,
+        modelPreset: resolvedConversationModel.candidateId ?? undefined
+      });
+      if (!sent) throw new Error(t("plugin.ui.responseFailed"));
+    } catch (error) {
+      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "send", message: pluginInvocationError(error), scopeKey: chatScopeKey
+      })));
+      throw error;
+    }
+  };
+  // A pinned command already has a button of its own above the composer.
+  // Listing it in the palette too would offer the same action twice under two
+  // different names, so the palette shows only the commands without a button.
+  const pluginSlashCommands: SlashCommandPaletteItem[] = selectSlashPluginCommands(pluginCommandTargets).map(({ command }) => ({
+    command: command.command,
+    title: command.name,
+    description: command.description,
+    icon: command.icon ?? "sparkles",
+    argHint: command.argHint ?? "",
+    synthetic: true
+  }));
+  const slashQuery = slashMenuDismissed
+    ? null
+    : slashPickerOpen
+      ? ""
+      : slashQueryFromInput(composerInput.slice(0, Math.min(composerSelection.start, composerInput.length)));
   const localizedSlashCommands = localizeSlashCommands(slashCommands, language, t);
   const slashCommandsWithLocal = [
+    ...pluginSlashCommands,
+    goalSlashCommand,
     lastCompactionSlashCommand,
-    ...localizedSlashCommands.filter((command) => command.command !== "/last-compaction")
+    ...localizedSlashCommands.filter((command) => (
+      command.command !== COMPOSER_GOAL_COMMAND
+      && command.command !== "/last-compaction"
+    ))
   ];
   const visibleSlashCommands = buildVisibleSlashCommands(slashCommandsWithLocal, state.agent.isSending, stopSlashCommand);
   const modeVisibleSlashCommands = selectedComposerCommand
@@ -1568,16 +2512,21 @@ export function HomePage() {
   const hasComposerPayload = Boolean(input.trim() || pendingAttachments.some((item) => item.status === "ready"));
   const hasComposerIntent = Boolean(input.trim() || pendingAttachments.length > 0);
   const stopInFlight = state.agent.currentChatId ? Boolean(state.agent.stopInFlightByChatId[state.agent.currentChatId]) : false;
-  const composerSendDisabled = stopInFlight
-    || !hasComposerPayload
-    || hasBlockedPendingMedia
-    || !connection
-    || isCreatingChat
-    || messageSendInFlight
-    || currentSessionProjectBlocked
-    || draftProjectBlocked
-    || state.agent.connectionStatus !== "connected"
-    || state.agent.recoveringGeneration !== null;
+  const pluginCommandInvocation = parsePluginCommandInvocation(input, pluginCommandTargets);
+  const agentRoutedPluginPrompt = buildAgentRoutedPluginPrompt(input, pluginCommandTargets);
+  const isDirectPluginCommand = Boolean(pluginCommandInvocation && !agentRoutedPluginPrompt);
+  const composerSendDisabled = isDirectPluginCommand
+    ? pendingAttachments.length > 0 || !clients
+    : stopInFlight
+      || !hasComposerPayload
+      || hasBlockedPendingMedia
+      || !connection
+      || isCreatingChat
+      || messageSendInFlight
+      || currentSessionProjectBlocked
+      || draftProjectBlocked
+      || state.agent.connectionStatus !== "connected"
+      || state.agent.recoveringGeneration !== null;
   const composerStopDisabled = stopInFlight || Boolean(isCurrentGoalActive && goalMutationPending);
   const composerPrimaryAction = agentComposerPrimaryAction({
     isRunning: isCurrentAgentRunning,
@@ -1715,10 +2664,82 @@ export function HomePage() {
   }
 
   /**
+   * Closes a card the user dismissed, keeping its cancellation out of the chat.
+   *
+   * A card the user opened ends by being cancelled, and the plugin reports that
+   * as an error. The user asked for the card to go away rather than to be told
+   * it went away, so the call is remembered as closed and the host drops what
+   * comes back for it.
+   */
+  function dismissPluginCall(callId: string) {
+    setDismissedPluginCalls((current) => new Set(current).add(callId));
+  }
+
+  /** Records an answered interaction so no other region offers it again. */
+  function rememberPluginInteraction(key: string) {
+    setAnsweredPluginInteractions((current) => new Set(current).add(key));
+  }
+
+  /** Hides the recorder without interrupting its pending interaction or audio. */
+  function closeRecorderPane() {
+    if (recordingEntry.open) recordingEntry.close();
+    const target = panelRecorders[0];
+    if (target) hidePluginCall(target.callId);
+    else setRecordingSession(null);
+  }
+
+  /**
+   * Steps the recorder card aside so another pane can take the column.
+   *
+   * The recorder and the file previews share one column, so raising either one
+   * has to put the other away. A card left waiting behind the pane would come
+   * back on top of it the moment the pane closed.
+   */
+  function putRecorderCardAside() {
+    // Switching panes hides every recorder card while leaving its microphone
+    // and pending interaction mounted. A completed transcript can be retired.
+    if (panelRecorders.length > 0) {
+      for (const call of panelRecorders) hiddenPluginSteps.set(call.callId, pluginInteractionSignature(call));
+      setHiddenPluginCalls((current) => new Set([...current, ...panelRecorders.map((call) => call.callId)]));
+    } else if (!recordingSession || recordingSession.status === "done") {
+      setRecordingSession(null);
+    }
+  }
+
+  /**
+   * Continues a gesture that ran past the end of a pinned card.
+   *
+   * The card scrolls on its own and is a sibling of the transcript, so the
+   * browser has nothing to chain the leftover delta to. Without this the wheel
+   * stops dead at a card's edge, which reads as the conversation being stuck
+   * even though it still has somewhere to go.
+   */
+  function scrollAgentConversationBy(deltaY: number) {
+    const element = scrollRef.current;
+    if (!element) return;
+    markAgentConversationUserScrollIntent();
+    element.scrollTop += deltaY;
+  }
+
+  /**
    * Sends one round of a live Agent conversation.
    */
   async function sendMessage() {
     if (runExactLocalSlashCommand(input)) {
+      return;
+    }
+    const clientRequestId = crypto.randomUUID();
+    const currentChatId = state.agent.currentChatId;
+    if (
+      currentChatId
+      && Boolean(input.trim())
+      && pendingAttachments.length === 0
+      && !input.trimStart().startsWith("/")
+      && routeChatFeedback(currentChatId, { message: input, clientRequestId })
+    ) {
+      dispatch(agentActions.pluginFeedbackRecorded(currentChatId, input, clientRequestId));
+      clearComposerAfterSend(chatScopeKey);
+      track({ name: "agent_send_message", params: { page_path: "/main" }, consentTier: "basic" });
       return;
     }
     if (resolvedConversationModel.unavailable) {
@@ -1742,7 +2763,6 @@ export function HomePage() {
     }
     const sendScopeKey = chatScopeKey;
     if (messageSendLocksRef.current.has(sendScopeKey)) return;
-    const clientRequestId = crypto.randomUUID();
     messageSendLocksRef.current.add(sendScopeKey);
     dispatch(agentActions.messageSendLockUpdated(sendScopeKey, clientRequestId));
     dispatch(agentActions.modelSelectionRequestStarted(
@@ -1759,8 +2779,8 @@ export function HomePage() {
         clientRequestId,
         connection,
         ensureChatSubscription,
-        content: input,
-        displayContent: selectedComposerCommand ? composerInput : undefined,
+        content: agentRoutedPluginPrompt ?? input,
+        displayContent: agentRoutedPluginPrompt ? input : selectedComposerCommand ? composerInput : undefined,
         language,
         pendingAttachments,
         uploadAgentMedia: (attachments) => clients!.memmyAgent.uploadAgentMedia(attachments),
@@ -1801,6 +2821,30 @@ export function HomePage() {
       dispatch(agentActions.messageSendLockUpdated(sendScopeKey, null));
     }
   }
+
+  async function submitAgentQuestionResponse(
+    _card: AgentQuestionCardPayload,
+    response: AgentQuestionResponse,
+  ): Promise<boolean> {
+    const chatId = state.agent.currentChatId;
+    const generation = connection?.getReadyGeneration() ?? null;
+    if (!chatId || !connection || generation === null) return false;
+    try {
+      await connection.respondToQuestion(chatId, response, generation);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  const answerAgentQuestionRef = useRef(
+    (_card: AgentQuestionCardPayload, _response: AgentQuestionResponse): Promise<boolean> => Promise.resolve(false)
+  );
+  answerAgentQuestionRef.current = submitAgentQuestionResponse;
+  const answerAgentQuestion = useCallback(
+    (card: AgentQuestionCardPayload, response: AgentQuestionResponse) => answerAgentQuestionRef.current(card, response),
+    []
+  );
 
   async function removeQueuedMessage(clientRequestId: string) {
     const chatId = state.agent.currentChatId;
@@ -1948,6 +2992,60 @@ export function HomePage() {
 
   function runExactLocalSlashCommand(command: string): boolean {
     const normalized = command.trim().toLowerCase();
+    const pluginInvocation = parsePluginCommandInvocation(command, pluginCommandTargets);
+    // A command with agentSkillId goes to the Agent too, so it is NOT intercepted
+    // here as a terminal action. But if it also declares a capabilityId the card
+    // should open immediately — we fire the invoke side-effect and then return
+    // false so the caller still sends the agent message.
+    if (pluginInvocation?.contribution.agentSkillId) {
+      if (pluginInvocation.contribution.capabilityId && clients && pendingAttachments.length === 0) {
+        const { plugin, contribution, arguments: commandArguments } = pluginInvocation;
+        const conversationId = state.agent.currentChatId ?? state.agent.currentSessionKey ?? chatScopeKey;
+        void clients.plugins.invoke(plugin.id, contribution.capabilityId, {
+          conversationId,
+          input: { command: contribution.command, arguments: commandArguments, context: { ...(draftTarget.kind === "project" ? { projectId: draftTarget.projectId } : {}), references: contextChips } },
+          origin: "user"
+        }).catch((error) => {
+          dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+            source: "send",
+            message: pluginInvocationError(error),
+            scopeKey: chatScopeKey
+          })));
+        });
+      }
+      return false;
+    }
+    if (pluginInvocation && pendingAttachments.length > 0) return false;
+    if (pluginInvocation && clients) {
+      const { plugin, contribution, arguments: commandArguments } = pluginInvocation;
+      const conversationId = state.agent.currentChatId ?? state.agent.currentSessionKey ?? chatScopeKey;
+      const invocationInput = {
+        command: contribution.command,
+        arguments: commandArguments,
+        context: {
+          ...(draftTarget.kind === "project" ? { projectId: draftTarget.projectId } : {}),
+          references: contextChips
+        }
+      };
+      const surface = plugin.manifest.ui?.surface;
+      if (contribution.surface && surface && (!surface.capabilities || surface.capabilities.includes(contribution.capabilityId))) {
+        openSurface({ pluginId: plugin.id, capabilityId: contribution.capabilityId, conversationId, input: invocationInput });
+        dispatch(appActions.navigate("/plugin"));
+      }
+      void clients.plugins.invoke(plugin.id, contribution.capabilityId, { conversationId, input: invocationInput, origin: "user" }).catch((error) => {
+        dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+          source: "send",
+          message: pluginInvocationError(error),
+          scopeKey: chatScopeKey
+        })));
+      });
+      rememberSlashCommand(contribution.command);
+      setSelectedComposerCommandForScope(chatScopeKey, null);
+      setCurrentComposerDraft("");
+      setSlashPickerOpen(false);
+      dispatch(agentActions.composerContextReferencesUpdated(chatScopeKey, []));
+      return true;
+    }
     if (pendingAttachments.length > 0) return false;
     if (normalized === "/last-compaction") {
       rememberSlashCommand("/last-compaction");
@@ -2119,8 +3217,11 @@ export function HomePage() {
    *
    * @param value The latest input box content.
    */
-  function updateComposerInput(value: string) {
+  function updateComposerInput(value: string, selectionStart = value.length, selectionEnd = selectionStart) {
+    composerAttachMenuRef.current?.removeAttribute("open");
     setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));
+    setComposerSelection({ start: selectionStart, end: selectionEnd });
+    setSlashPickerOpen(false);
     setSlashMenuDismissed(false);
     setSelectedCommandIndex(0);
     if (
@@ -2157,6 +3258,51 @@ export function HomePage() {
     requestAnimationFrame(() => {
       element.scrollTop = element.scrollHeight;
     });
+  }
+
+  function addComposerContextChip(chip: ComposerContextChip) {
+    const next = contextChips.some((existing) => existing.kind === chip.kind && existing.id === chip.id)
+      ? contextChips
+      : [...contextChips, chip];
+    dispatch(agentActions.composerContextReferencesUpdated(chatScopeKey, next));
+  }
+
+  function removeComposerContextChip(chip: ComposerContextChip) {
+    dispatch(agentActions.composerContextReferencesUpdated(
+      chatScopeKey,
+      contextChips.filter((existing) => !(existing.kind === chip.kind && existing.id === chip.id))
+    ));
+  }
+
+  function selectHomeSuggestion(text: string) {
+    const nextDraft = homeSuggestionDraft(text);
+    setSelectedComposerCommandForScope(chatScopeKey, null);
+    setCurrentComposerDraft(nextDraft);
+    setComposerSelection({ start: nextDraft.length, end: nextDraft.length });
+    setSlashMenuDismissed(true);
+    window.requestAnimationFrame(() => {
+      if (inputRef.current) {
+        resizeComposerInput(inputRef.current);
+        inputRef.current.focus();
+        inputRef.current.setSelectionRange(nextDraft.length, nextDraft.length);
+      }
+    });
+  }
+
+  function insertComposerSlashTrigger() {
+    composerAttachMenuRef.current?.removeAttribute("open");
+    setProjectPickerOpen(false);
+    setSlashMenuDismissed(false);
+    setSlashPickerOpen((open) => !open);
+    setSelectedCommandIndex(0);
+    if (
+      clients?.memmyAgent &&
+      slashCommandsRef.current.length === 0 &&
+      !slashCommandsInFlightRef.current
+    ) {
+      loadSlashCommands({ resetAttempts: true });
+    }
+    inputRef.current?.focus();
   }
 
   useLayoutEffect(() => {
@@ -2204,6 +3350,7 @@ export function HomePage() {
 
   function resetTransientConversationUi() {
     setSlashMenuDismissed(true);
+    setSlashPickerOpen(false);
     setSelectedCommandIndex(0);
     setStatusPanel({ open: false });
     closeLastCompactionPanel();
@@ -2332,6 +3479,10 @@ export function HomePage() {
   }
 
   function selectSlashCommand(command: SlashCommandPaletteItem) {
+    const selectedFromCapabilityPicker = slashPickerOpen;
+    const selectionStart = inputRef.current?.selectionStart ?? composerSelection.start;
+    const selectionEnd = inputRef.current?.selectionEnd ?? composerSelection.end;
+    setSlashPickerOpen(false);
     if (command.command === "/stop") {
       if (state.agent.isSending) {
         stopCurrentTurn();
@@ -2391,9 +3542,22 @@ export function HomePage() {
     }
 
     rememberSlashCommand(command.command);
-    setCurrentComposerDraft(command.argHint ? `${command.command} ` : command.command);
+    const edit = selectedFromCapabilityPicker
+      ? insertCapabilityAtSelection(composerInput, command.command, selectionStart, selectionEnd)
+      : replaceSlashQueryAtSelection(
+          composerInput,
+          command.command,
+          selectionStart,
+          selectionEnd,
+          Boolean(command.argHint)
+        );
+    setCurrentComposerDraft(edit.value);
+    setComposerSelection({ start: edit.caret, end: edit.caret });
     setSlashMenuDismissed(true);
-    inputRef.current?.focus();
+    window.requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(edit.caret, edit.caret);
+    });
   }
 
   /**
@@ -2401,6 +3565,10 @@ export function HomePage() {
    */
   function openMediaFilePicker() {
     fileInputRef.current?.click();
+  }
+
+  function openFolderPicker() {
+    folderInputRef.current?.click();
   }
 
   /**
@@ -2450,7 +3618,7 @@ export function HomePage() {
    *
    * @param event The textarea keyboard event.
    */
-  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+  function handleComposerKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
     if (isComposingKeyboardEvent(event) && (event.key === "Enter" || event.key === "Tab")) {
       return;
     }
@@ -2476,6 +3644,7 @@ export function HomePage() {
       }
       if (event.key === "Escape") {
         event.preventDefault();
+        setSlashPickerOpen(false);
         setSlashMenuDismissed(true);
         return;
       }
@@ -2539,6 +3708,29 @@ export function HomePage() {
     }
   }
 
+  function selectFolder(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    const reference = composerFolderReferenceFromFiles(
+      files,
+      (file) => {
+        try {
+          return window.memmy?.getPathForFile(file) || file.name;
+        } catch {
+          return file.name;
+        }
+      }
+    );
+    if (reference) {
+      addComposerContextChip({
+        ...reference,
+        fileCount: files.length,
+        totalBytes: files.reduce((total, file) => total + file.size, 0)
+      });
+    }
+    event.target.value = "";
+    inputRef.current?.focus();
+  }
+
   function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
     const files = clipboardAttachmentFilesFromDataTransfer(event.clipboardData);
     if (!files.length) {
@@ -2550,7 +3742,10 @@ export function HomePage() {
   }
 
   function handleComposerDragOver(event: DragEvent<HTMLElement>) {
-    if (!dataTransferHasAttachmentFiles(event.dataTransfer)) {
+    if (
+      !dataTransferHasComposerReference(event.dataTransfer)
+      && !dataTransferHasAttachmentFiles(event.dataTransfer)
+    ) {
       return;
     }
 
@@ -2559,6 +3754,16 @@ export function HomePage() {
   }
 
   function handleComposerDrop(event: DragEvent<HTMLElement>) {
+    const reference = readComposerReferenceDrag(event.dataTransfer);
+    if (reference) {
+      event.preventDefault();
+      dispatch(agentActions.composerContextReferencesUpdated(
+        chatScopeKey,
+        mergeComposerContextReferences(contextChips, [reference])
+      ));
+      inputRef.current?.focus();
+      return;
+    }
     if (!dataTransferHasAttachmentFiles(event.dataTransfer)) {
       return;
     }
@@ -2573,6 +3778,26 @@ export function HomePage() {
       inputRef.current?.focus();
     });
   }
+
+  /**
+   * Sends a recording's transcript into the conversation.
+   *
+   * The design offers two destinations, and they differ in one thing:
+   * 添加到会话 drops the file into the conversation already on screen, while
+   * 总结 starts a fresh task so the summary does not land in the middle of
+   * whatever the user was already doing. The prompt is the design's own.
+   */
+  deliverRecordingRef.current = (transcript, mode) => {
+    if (mode === "summarize") {
+      const draftScope = agentChatScopeKey(null, state.agent.newChatRequestId + 1);
+      dispatch(agentActions.newChatRequested());
+      dispatch(agentActions.composerDraftUpdated(draftScope, t("recording.summaryPrompt")));
+      void attachMediaFilesToScope(draftScope, [transcript]);
+      dispatch(appActions.navigate("/main"));
+      return;
+    }
+    void attachMediaFilesToScope(chatScopeKey, [transcript]);
+  };
 
   async function attachMediaFilesToScope(scopeKey: string, files: File[]) {
     if (!files.length) {
@@ -2644,6 +3869,93 @@ export function HomePage() {
     });
   }
 
+  function renderComposerLeadingActions() {
+    return (
+      <>
+        <details ref={composerAttachMenuRef} className="agent-composer-attach-menu">
+          <summary
+            aria-label={t("home.quick.attach")}
+            title={t("home.quick.attachHint")}
+            className="composer-action-btn"
+            onClick={() => {
+              setSlashPickerOpen(false);
+              setSlashMenuDismissed(true);
+              setProjectPickerOpen(false);
+            }}
+          >
+            <Plus size={15} strokeWidth={2} />
+          </summary>
+          <div className="agent-composer-attach-menu__popover" role="menu">
+            <button
+              type="button"
+              role="menuitem"
+              onClick={(event) => {
+                event.currentTarget.closest("details")?.removeAttribute("open");
+                openMediaFilePicker();
+              }}
+            >
+              {t("home.quick.uploadFile")}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={(event) => {
+                event.currentTarget.closest("details")?.removeAttribute("open");
+                openFolderPicker();
+              }}
+            >
+              {t("home.quick.uploadFolder")}
+            </button>
+          </div>
+        </details>
+        <div ref={composerCapabilityMenuRef} className="composer-quick-actions__anchor">
+          <button
+            type="button"
+            aria-label={t("home.quick.capability")}
+            title={t("home.quick.capabilityHint")}
+            aria-expanded={slashPickerOpen}
+            onClick={insertComposerSlashTrigger}
+            className={`composer-action-btn${slashPickerOpen ? " composer-action-btn--active" : ""}`}
+          >
+            <SquareSlash size={15} strokeWidth={2} />
+          </button>
+          {slashMenuOpen && slashPickerOpen ? (
+            <div className="composer-quick-actions__popover composer-quick-actions__popover--slash">
+              <AgentCommandPalette
+                commands={filteredSlashCommands}
+                heading={t("home.commandPalette.commands")}
+                selectedIndex={selectedCommandIndex}
+                onSelect={selectSlashCommand}
+              />
+            </div>
+          ) : null}
+        </div>
+        {selectedComposerCommand ? (
+          <ComposerCommandChip
+            command={selectedComposerCommand}
+            label={t("home.command.goalChip")}
+            removeLabel={t("common.remove")}
+            onRemove={clearSelectedComposerCommand}
+          />
+        ) : null}
+      </>
+    );
+  }
+
+  const openLegalArtifact = (artifact: PluginArtifactRef) => {
+    recordingEntry.close();
+    putRecorderCardAside();
+    if (artifact.path && sessionArtifactClient) {
+      void sessionArtifactClient.previewArtifact(artifact.path).then((opened) => {
+        if (!opened) { setPreviewPanelOpen(false); setPluginArtifactPreview(artifact); }
+      });
+    } else { setPreviewPanelOpen(false); setPluginArtifactPreview(artifact); }
+  };
+  const reopenPluginRecording = (start: boolean) => {
+    recordingEntry.close();
+    setHiddenPluginCalls((current) => new Set([...current].filter((id) => !panelRecorders.some((call) => call.callId === id))));
+    if (start) recordingSession?.onStart?.();
+  };
   const environmentPanel = environmentPanelOpen && environmentScope ? (
     <AgentEnvironmentPanel
       client={clients?.memmyAgent ?? null}
@@ -2657,155 +3969,413 @@ export function HomePage() {
     />
   ) : null;
 
+  // Keep the microphone owner mounted while its bar is in the composer dock.
+  // The side pane opens after recording starts; the top-bar entry opens the list.
+  // rather than this one.
+  const recorderPaneMounted = recordingSession !== null || panelRecorders.length > 0;
+  const recorderPaneOpen = recordingSession !== null && recordingSession.status !== "idle" && !recordingEntry.open && (panelRecorders.length > 0
+    ? panelRecorders.some((call) => !hiddenPluginCalls.has(call.callId))
+    : recordingSession !== null);
+  const sidePreviewOpen = previewPanelOpen || pluginArtifactPreview !== null || recorderPaneOpen || recordingEntry.open;
+  const previewToggle = previewScope ? (
+    <button
+      type="button"
+      className={`agent-preview-toggle${previewPanelOpen ? " agent-preview-toggle--active" : ""}`}
+      aria-label={t("common.preview")}
+      aria-pressed={previewPanelOpen}
+      title={t("common.preview")}
+      onClick={() => {
+        setPluginArtifactPreview(null);
+        // The two share the side panel, so showing the files takes the
+        // recording page back out of the strip.
+        if (recordingEntry.open) recordingEntry.close();
+        // Opening the files also puts the recorder card away: the recorder and
+        // the previews cannot both hold the column.
+        if (!previewPanelOpen) putRecorderCardAside();
+        setPreviewPanelOpen((open) => !open);
+      }}
+    >
+      <PanelRight size={15} aria-hidden="true" />
+    </button>
+  ) : null;
+  // Shared by the title bar and the preview toolbar so the recordings stay one
+  // click away whichever of the two is showing. While the recording tab is
+  // open, the tab's own close button is the control.
+  const recordingToggle = topbarPluginCommand && !recordingEntry.open ? (
+    <button
+      type="button"
+      className="agent-preview-toggle"
+      aria-label={topbarPluginCommand.command.name}
+      aria-pressed={false}
+      title={topbarPluginCommand.command.name}
+      data-recording-toggle
+      onClick={toggleRecordingEntry}
+    >
+      {(() => {
+        const Icon = resolveContributionIcon(topbarPluginCommand.command.icon);
+        return <Icon size={15} aria-hidden="true" />;
+      })()}
+    </button>
+  ) : null;
+
+  const workspacePreviewPanel = previewScope ? (
+    <WorkspaceArtifactPanel
+      key={`${previewScope.kind}:${previewScope.key}`}
+      scope={previewScope}
+      hidden={(!previewPanelOpen && !recordingEntry.open) || pluginArtifactPreview !== null || recorderPaneOpen}
+      extraTabs={recordingEntry.open && topbarPluginCommand ? [{
+        id: "interview-recording",
+        // The label and icon come from the plugin that asked for the button, so
+        // the tab and the button that opens it read as one thing.
+        label: topbarPluginCommand.command.name,
+        icon: (() => {
+          const Icon = resolveContributionIcon(topbarPluginCommand.command.icon);
+          return <Icon size={12} aria-hidden="true" />;
+        })(),
+        render: () => <RecordingEntryPage session={recordingEntry.session}
+          uploadBlocked={panelRecorders.length > 0}
+          onStart={panelRecorders.length > 0 ? () => reopenPluginRecording(true) : undefined}
+          externalRecording={recordingSession && ["recording", "paused", "starting", "transcribing"].includes(recordingSession.status) ? {
+            title: recordingSession.title, elapsedMs: recordingSession.elapsedMs, status: recordingSession.status,
+            onOpen: () => reopenPluginRecording(false)
+          } : undefined} />,
+        onClose: recordingEntry.close
+      }] : []}
+      rootLabel={previewRootLabel}
+      loadDirectory={loadPreviewDirectory}
+      loadFile={loadWorkspaceFile}
+      openFile={openWorkspaceFile}
+      revealFile={revealWorkspaceFile}
+      onAddToChat={addComposerContextChip}
+      refreshKey={`${currentHistoryVersion}:${isCurrentAgentRunning ? "running" : "idle"}`}
+      focusFile={previewFocusFile}
+      focusExternalFile={previewFocusExternalFile}
+      onWidthChange={setPreviewPanelWidth}
+      sharedRowWidth={workspaceLayoutWidth}
+      sharedRowReservedWidth={SHARED_ROW_PRIMARY_RESERVE}
+      toolbarStart={recordingToggle}
+      toolbarEnd={previewToggle}
+      emptyLabel={t("workspaceArtifact.noFiles")}
+      emptyDetail={previewRootLabel}
+    />
+  ) : null;
+  const pluginPreviewPanel = pluginArtifactPreview && clients && (!recordingSession || !recorderPaneOpen) ? (
+    <PluginArtifactPreviewPanel
+      key={pluginArtifactPreview.id}
+      artifact={pluginArtifactPreview}
+      readArtifact={(uri) => uri.startsWith("blob:") ? fetch(uri).then((response) => response.blob()) : clients.plugins.readArtifact(uri)}
+      onClose={() => setPluginArtifactPreview(null)}
+      onWidthChange={setPreviewPanelWidth}
+      sharedRowWidth={workspaceLayoutWidth}
+      sharedRowReservedWidth={SHARED_ROW_PRIMARY_RESERVE}
+    />
+  ) : null;
+  // A running interview takes over the visible side panel while the workspace
+  // preview remains mounted in the background so its tabs and view state survive.
+  const recordingRecorder = <RecordingBarPortalContext.Provider value={{ target: recordingBarTarget, hidden: legalFlowCardOpen || legalGuideOpen || panelRecorders.every((call) => hiddenPluginCalls.has(call.callId)) }}><PluginCapabilityHost
+    region="panel"
+    calls={visiblePluginCalls}
+    plugins={installedPlugins}
+    client={clients?.plugins ?? null}
+    uploadFiles={clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined}
+    asrClient={clients?.asr}
+    onRecordingSession={setRecordingSession}
+                  onRecordingArchived={archivePluginRecording}
+    dismissedCallIds={dismissedPluginCalls}
+    hiddenCallIds={hiddenPluginCalls}
+    onCallHidden={hidePluginCall}
+    onCallDismissed={dismissPluginCall}
+    answeredInteractions={answeredPluginInteractions}
+    onInteractionAnswered={rememberPluginInteraction}
+  /></RecordingBarPortalContext.Provider>;
+  const recordingPreviewPanel = recorderPaneMounted ? (
+    <InterviewRecordingPanel
+      hidden={!recorderPaneOpen}
+      session={recordingSession}
+      bar={panelRecorders.length > 0 ? recordingRecorder : undefined}
+      title={panelRecorderTitle ?? undefined}
+      onClose={() => { closeRecorderPane(); if (!recordingEntry.open) recordingEntry.toggle(); }}
+      onWidthChange={setPreviewPanelWidth}
+      sharedRowWidth={workspaceLayoutWidth}
+      sharedRowReservedWidth={SHARED_ROW_PRIMARY_RESERVE}
+      toolbarEnd={previewToggle}
+    />
+  ) : null;
+  const previewPanel = (
+    <>
+      {workspacePreviewPanel}
+      {recordingPreviewPanel}
+      {pluginPreviewPanel}
+    </>
+  );
+
   return (
     <AppFrame
       title={t("home.title")}
       topBar={hasActiveConversation || environmentScope ? (
-        <h1 className="agent-conversation-title" title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}>
-          <span className="agent-conversation-title__text">
-            {hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}
-          </span>
-          {hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
-        </h1>
+        <div
+          className={`agent-conversation-topbar${sidePreviewOpen ? " agent-conversation-topbar--preview-open" : ""}`}
+          style={{ "--agent-preview-panel-width": `${previewPanelWidth}px` } as CSSProperties}
+        >
+          <h1 className="agent-conversation-title" title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}>
+            <span className="agent-conversation-title__text">
+              {hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}
+            </span>
+            {hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
+          </h1>
+        </div>
       ) : null}
       topBarEnd={hasActiveConversation || environmentScope ? (
-        <button
-          type="button"
-          className={`agent-environment-toggle${environmentPanelOpen ? " agent-environment-toggle--active" : ""}`}
-          data-agent-environment-toggle
-          aria-label={t("home.environment.title")}
-          aria-pressed={environmentPanelOpen}
-          title={t("home.environment.title")}
-          onClick={() => setEnvironmentPanelOpen((open) => !open)}
-        >
-          <SlidersHorizontal size={16} aria-hidden="true" />
-        </button>
+          <div
+            className="agent-conversation-topbar__actions"
+            style={sidePreviewOpen ? { "--agent-preview-panel-width": `${previewPanelWidth}px` } as CSSProperties : undefined}
+          >
+            {environmentScope && !recordingEntry.open ? (
+              <button
+                type="button"
+                className={`agent-environment-toggle${environmentPanelOpen ? " agent-environment-toggle--active" : ""}${sidePreviewOpen ? " agent-environment-toggle--with-preview" : ""}`}
+                data-agent-environment-toggle
+                aria-label={t("home.environment.title")}
+                aria-pressed={environmentPanelOpen}
+                title={t("home.environment.title")}
+                onClick={() => setEnvironmentPanelOpen((open) => !open)}
+              >
+                <SlidersHorizontal size={15} aria-hidden="true" />
+              </button>
+            ) : null}
+            {/* The recording entry sits with the preview controls. Its tab owns
+                the close action while open; this title-bar button is rendered
+                only while the panel is closed so two audio controls cannot
+                overlap while the pane width is settling. */}
+            {!sidePreviewOpen ? recordingToggle : null}
+            {!sidePreviewOpen ? previewToggle : null}
+          </div>
       ) : null}
-      topBarBorder={Boolean(hasActiveConversation || environmentScope)}
+      topBarBorder={Boolean(hasActiveConversation || environmentScope) && !sidePreviewOpen}
       windowsTitlebarSafe={Boolean(hasActiveConversation || environmentScope)}
     >
-      <div className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}`}>
+      <div
+        ref={workspaceLayoutRef}
+        className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}${sidePreviewOpen ? " agent-workspace-layout--preview-open" : ""}`}
+        style={{ "--agent-preview-panel-width": `${previewPanelWidth}px` } as CSSProperties}
+      >
         {!hasActiveConversation ? (
-        <section className="app-frame-page-content home-empty-screen flex flex-col items-center justify-center h-full">
-          <div className="text-center mb-8">
-            <div className="home-empty-brand-mascot flex justify-center">
-              <Memmy pose="think" size={165} className="memmy-bob" />
-            </div>
-            <h1 className="text-2xl font-bold text-text-ink">{t("home.subtitle")}</h1>
-          </div>
-          <div className="w-full max-w-2xl">
-            <AgentOperationErrorSlot message={agentError} />
-            <div className="home-empty-composer-stack">
-              <div
-                className="relative home-empty-composer agent-composer-shell rounded-card-lg"
-                onDragOver={handleComposerDragOver}
-                onDrop={handleComposerDrop}
-              >
-                {slashMenuOpen && (
-                  <div className="absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
-                    <AgentCommandPalette commands={filteredSlashCommands} heading={t("home.commandPalette.commands")} selectedIndex={selectedCommandIndex} onSelect={selectSlashCommand} />
-                  </div>
-                )}
-                {lastCompactionPanel.open && !slashMenuOpen && (
-                  <div className="absolute left-0 bottom-full mb-3 z-30 w-full" style={{ right: 0 }}>
-                    <AgentStatusPanel state={lastCompactionPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={closeLastCompactionPanel} />
-                  </div>
-                )}
-                <ComposerMediaPreviewStrip
-                  items={pendingAttachments}
-                  onRemove={removePendingMedia}
-                  removeLabel={t("common.remove")}
-                  selectedLabel={t("home.media.addPhotoFile")}
-                  t={t}
+          <section className="app-frame-page-content home-empty-screen">
+            {/* Mid row stays vertically centered like the original empty home. */}
+            <div className="home-empty-mid">
+              <div className="text-center mb-8">
+                <div className="home-empty-brand-mascot flex justify-center">
+                  <Memmy pose="think" size={165} className="memmy-bob" />
+                </div>
+                <h1 className="text-2xl font-bold text-text-ink">{t("home.subtitle")}</h1>
+              </div>
+            <div className="home-empty-mid__composer">
+              <AgentOperationErrorSlot message={agentError} />
+              <div className="home-empty-composer-stack">
+                {/*
+                  The empty screen offers the scenario cards, so the pinned
+                  buttons stay out of it and appear once a flow is under way.
+                  A card already in flight still renders here, since a recording
+                  must stay reachable wherever the user navigates.
+                */}
+                <div ref={setRecordingBarTarget} className="legal-recording-bar-slot" />
+                <PluginCapabilityHost
+                  region="pinned"
+                  onRequestDiagnosis={generateLegalDiagnosis}
+                  onOpenArtifact={openLegalArtifact}
+                  calls={visiblePluginCalls}
+                  plugins={installedPlugins}
+                  client={clients?.plugins ?? null}
+                  uploadFiles={clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined}
+                  asrClient={clients?.asr}
+                  onRecordingSession={setRecordingSession}
+                  onRecordingArchived={archivePluginRecording}
+                  dismissedCallIds={dismissedPluginCalls}
+                  hiddenCallIds={hiddenPluginCalls}
+                  onCallHidden={hidePluginCall}
+                  onRegionWheelOverflow={scrollAgentConversationBy}
+                  onCallDismissed={dismissPluginCall}
+                  answeredInteractions={answeredPluginInteractions}
+                  onInteractionAnswered={rememberPluginInteraction}
                 />
-                {selectedComposerCommand ? (
-                  <div className="composer-command-chip-slot composer-command-chip-slot--home">
-                    <ComposerCommandChip
-                      command={selectedComposerCommand}
-                      label={t("home.command.goalChip")}
-                      removeLabel={t("common.remove")}
-                      onRemove={clearSelectedComposerCommand}
+                <div
+                  ref={composerShellRef}
+                  className={`relative home-empty-composer agent-composer-shell rounded-card-lg${slashMenuOpen ? " home-empty-composer--menu-open" : ""}`}
+                  onDragOver={handleComposerDragOver}
+                  onDrop={handleComposerDrop}
+                >
+                  {lastCompactionPanel.open && !slashMenuOpen && (
+                    <div className="absolute left-0 bottom-full mb-3 z-30 w-full" style={{ right: 0 }}>
+                      <AgentStatusPanel state={lastCompactionPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={closeLastCompactionPanel} />
+                    </div>
+                  )}
+                  {pendingAttachments.length || contextChips.length ? (
+                    <div className="composer-context-attachments">
+                      <ComposerMediaPreviewStrip
+                        items={pendingAttachments}
+                        onRemove={removePendingMedia}
+                        removeLabel={t("common.remove")}
+                        selectedLabel={t("home.media.addPhotoFile")}
+                        t={t}
+                      />
+                      <HomeContextChips chips={contextChips} onRemove={removeComposerContextChip} />
+                    </div>
+                  ) : null}
+                  <ComposerHighlightedTextarea
+                    textareaRef={inputRef}
+                    value={composerInput}
+                    highlightedCommands={slashCommandsWithLocal.map((command) => command.command)}
+                    placeholder={selectedComposerCommand ? t("home.goal.input") : t("home.input")}
+                    rows={3}
+                    onChange={(event) => {
+                      updateComposerInput(
+                        event.target.value,
+                        event.target.selectionStart,
+                        event.target.selectionEnd
+                      );
+                      resizeComposerInput(event.target);
+                    }}
+                    onKeyDown={handleComposerKeyDown}
+                    onPaste={handleComposerPaste}
+                    className="w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40"
+                  />
+                  {slashMenuOpen && !slashPickerOpen ? (
+                    <ComposerCaretMenu textareaRef={inputRef} containerRef={composerShellRef} value={composerInput}>
+                      <AgentCommandPalette
+                        commands={filteredSlashCommands}
+                        heading={t("home.commandPalette.commands")}
+                        selectedIndex={selectedCommandIndex}
+                        onSelect={selectSlashCommand}
+                      />
+                    </ComposerCaretMenu>
+                  ) : null}
+                  <div className="composer-actions absolute bottom-3 left-4 z-50">
+                    {renderComposerLeadingActions()}
+                  </div>
+                  <div className="composer-actions absolute bottom-3 right-4 z-50">
+                    <AgentModelSelector
+                      mode={modelWorkspaceMode}
+                      scopeKey={modelSelectionScopeKey}
+                      disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
+                      seedConfig={state.modelConfig}
+                      onDefaultModelSelected={persistDefaultModel}
+                    />
+                    <button
+                      type="button"
+                      aria-label={t("home.voiceInput")}
+                      title={t("home.voiceInput")}
+                      disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
+                      onClick={toggleVoiceInput}
+                      className={`composer-action-btn${asrRecorder.isRecording ? " composer-action-btn--active" : ""}`}
+                    >
+                      {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
+                    </button>
+                    <ComposerSubmitButton
+                      isSending={composerPrimaryAction === "stop"}
+                      disabled={composerSubmitDisabled}
+                      sendLabel={t("home.send")}
+                      stopLabel={t("home.stop")}
+                      onClick={composerPrimaryAction === "stop" ? stopCurrentTurn : () => void sendMessage()}
                     />
                   </div>
-                ) : null}
-                <textarea
-                  ref={inputRef}
-                  value={composerInput}
-                  placeholder={selectedComposerCommand ? t("home.goal.input") : t("home.input")}
-                  rows={3}
-                  onChange={(event) => {
-                    updateComposerInput(event.target.value);
-                    resizeComposerInput(event.target);
-                  }}
-                  onKeyDown={handleComposerKeyDown}
-                  onPaste={handleComposerPaste}
-                  className="w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40"
-                />
-                <div className="composer-actions absolute bottom-3 right-4 z-50">
-                  <AgentModelSelector
-                    mode={modelWorkspaceMode}
-                    scopeKey={modelSelectionScopeKey}
-                    disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
-                    seedConfig={state.modelConfig}
-                    onDefaultModelSelected={persistDefaultModel}
+                </div>
+                <div className="home-composer-toolbar">
+                  <ProjectTargetPicker
+                    open={projectPickerOpen}
+                    target={draftTarget}
+                    selectedProject={selectedDraftProject}
+                    projects={state.agent.projects}
+                    sessions={state.agent.sessions}
+                    registryState={state.agent.projectRegistryState}
+                    disabled={messageSendInFlight || projectPickerOperationId != null}
+                    onToggle={() => setProjectPickerOpen((open) => !open)}
+                    onClose={() => setProjectPickerOpen(false)}
+                    onSelect={selectDraftTarget}
+                    onChooseOther={() => void selectOtherProjectFolder()}
                   />
-                  <button
-                    type="button"
-                    aria-label={t("home.media.menu")}
-                    title={t("home.media.menu")}
-                    onClick={openMediaFilePicker}
-                    className="composer-action-btn"
-                  >
-                    <Plus size={15} strokeWidth={2} />
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={t("home.voiceInput")}
-                    title={t("home.voiceInput")}
-                    disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
-                    onClick={toggleVoiceInput}
-                    className={`composer-action-btn${asrRecorder.isRecording ? " composer-action-btn--active" : ""}`}
-                  >
-                    {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
-                  </button>
-                  <ComposerSubmitButton
-                    isSending={isCurrentAgentRunning}
-                    disabled={composerSubmitDisabled}
-                    sendLabel={t("home.send")}
-                    stopLabel={t("home.stop")}
-                    onClick={isCurrentAgentRunning ? stopCurrentTurn : () => void sendMessage()}
+                  <AgentWorkspaceContext
+                    snapshot={workspaceEnvironment.data?.snapshot ?? null}
+                    branches={workspaceEnvironment.data?.branches ?? []}
+                    loading={workspaceEnvironment.loading}
+                    error={workspaceEnvironment.error}
+                    onSwitchBranch={workspaceEnvironment.switchBranch}
+                    onCreateOrCheckoutBranch={workspaceEnvironment.createOrCheckoutBranch}
                   />
                 </div>
               </div>
-              <div className="home-composer-toolbar">
-                <ProjectTargetPicker
-                  open={projectPickerOpen}
-                  target={draftTarget}
-                  selectedProject={selectedDraftProject}
-                  projects={state.agent.projects}
-                  sessions={state.agent.sessions}
-                  registryState={state.agent.projectRegistryState}
-                  disabled={messageSendInFlight || projectPickerOperationId != null}
-                  onToggle={() => setProjectPickerOpen((open) => !open)}
-                  onClose={() => setProjectPickerOpen(false)}
-                  onSelect={selectDraftTarget}
-                  onChooseOther={() => void selectOtherProjectFolder()}
-                />
-                <AgentWorkspaceContext
-                  snapshot={workspaceEnvironment.data?.snapshot ?? null}
-                  branches={workspaceEnvironment.data?.branches ?? []}
-                  loading={workspaceEnvironment.loading}
-                  error={workspaceEnvironment.error}
-                  onSwitchBranch={workspaceEnvironment.switchBranch}
-                  onCreateOrCheckoutBranch={workspaceEnvironment.createOrCheckoutBranch}
-                />
-              </div>
+              {pluginScenarios.length > 0 ? (
+                /*
+                  An installed plugin replaces the generic starters rather than
+                  queueing behind them: someone who has the plugin installed is
+                  here for its scenarios, and stacking both sets buries them.
+                */
+                <div className="home-scenario-cards" aria-label={t("home.empty")}>
+                  {pluginScenarios.map((scenario) => {
+                    const Icon = resolveContributionIcon(scenario.icon);
+                    return (
+                      <button
+                        key={`${scenario.pluginId}:${scenario.id}`}
+                        type="button"
+                        className="home-scenario-card"
+                        onClick={() => selectHomeSuggestion(scenario.prompt)}
+                      >
+                        <span className="home-scenario-card__icon" aria-hidden="true"><Icon size={16} /></span>
+                        <span className="home-scenario-card__body">
+                          <span className="home-scenario-card__title">{scenario.name}</span>
+                          <span className="home-scenario-card__description">{scenario.description}</span>
+                        </span>
+                        <span className="home-scenario-card__cta" aria-hidden="true">
+                          {t("home.scenario.try")}
+                          <ArrowRight size={12} />
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="home-prompt-suggestions" aria-label={t("home.empty")}>
+                  <button
+                    type="button"
+                    onClick={() => selectHomeSuggestion(t("home.suggestionPrompt.one"))}
+                  >
+                    <span className="home-prompt-suggestions__icon" aria-hidden="true"><BookOpenText size={15} /></span>
+                    <span>{t("home.suggestion.one")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => selectHomeSuggestion(t("home.suggestionPrompt.two"))}
+                  >
+                    <span className="home-prompt-suggestions__icon" aria-hidden="true"><CalendarCheck2 size={15} /></span>
+                    <span>{t("home.suggestion.two")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => selectHomeSuggestion(t("home.suggestionPrompt.three"))}
+                  >
+                    <span className="home-prompt-suggestions__icon" aria-hidden="true"><History size={15} /></span>
+                    <span>{t("home.suggestion.three")}</span>
+                  </button>
+                </div>
+              )}
             </div>
+          </div>
+          <div className="home-empty-below">
             <div className="home-empty-status-area">
-              {statusText && <p className="text-center text-xs text-text-ink/45 mt-4">{statusText}</p>}
-              <p className="text-center text-[11px] text-text-ink/40 mt-4">{t("home.notice")}</p>
+              {statusText && <p className="text-center text-xs text-text-ink/45 mt-3">{statusText}</p>}
+              <p className="text-center text-[11px] text-text-ink/40 mt-3">{t("home.notice")}</p>
             </div>
             <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
+            <input
+              ref={(node) => {
+                folderInputRef.current = node;
+                node?.setAttribute("webkitdirectory", "");
+              }}
+              type="file"
+              multiple
+              hidden
+              className="hidden"
+              onChange={selectFolder}
+            />
           </div>
         </section>
         ) : (
@@ -2817,7 +4387,7 @@ export function HomePage() {
             onWheel={markAgentConversationUserScrollIntent}
             onTouchMove={markAgentConversationUserScrollIntent}
           >
-            <div className="agent-conversation-content max-w-3xl mx-auto space-y-3">
+            <div ref={conversationContentRef} className="agent-conversation-content max-w-3xl mx-auto space-y-3">
               {displayConnectionStatus !== "connected" && (
                 <div className="text-center">
                   <span className="inline-flex text-[11px] px-3 py-1 rounded-tag bg-background-paper text-text-ink/55 border border-border-stone/30">
@@ -2835,9 +4405,38 @@ export function HomePage() {
                 forceMessageActionsForMessageId={firstEncounterRelayAnswerMessageId}
                 retryWaitStatus={state.agent.currentChatId ? state.agent.retryWaitStatusByChatId[state.agent.currentChatId] ?? null : null}
                 isSending={state.agent.isSending}
+                waitingForPluginInteraction={waitingForPluginInteraction}
                 sanitizePlatformApiErrors={sanitizePlatformApiErrors}
                 artifactClient={sessionArtifactClient}
                 memoryRuntimeClient={clients?.memoryRuntime ?? null}
+                onAnswerQuestion={answerAgentQuestion}
+              />
+              <PluginCapabilityHost
+                region="flow"
+                calls={visiblePluginCalls}
+                legalDelivery={{
+                  ready: !isCurrentAgentRunning,
+                  recordings: selectRecordingDeliveryFiles(recordingEntry.session.recordings, state.agent.currentChatId ?? state.agent.currentSessionKey)
+                }}
+                plugins={installedPlugins}
+                client={clients?.plugins ?? null}
+                uploadFiles={clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined}
+                asrClient={clients?.asr}
+                onAddArtifact={(artifact) => setCurrentComposerDraft((current) => appendPluginArtifact(current, artifact))}
+                onOpenArtifact={(artifact) => {
+                  if (artifact.path && sessionArtifactClient) {
+                    void sessionArtifactClient.previewArtifact(artifact.path).then((opened) => {
+                      if (opened) return;
+                      setPreviewPanelOpen(false);
+                      setPluginArtifactPreview(artifact);
+                    });
+                    return;
+                  }
+                  setPreviewPanelOpen(false);
+                  setPluginArtifactPreview(artifact);
+                }}
+                answeredInteractions={answeredPluginInteractions}
+                onInteractionAnswered={rememberPluginInteraction}
               />
             </div>
           </div>
@@ -2855,11 +4454,6 @@ export function HomePage() {
           <div ref={composerOverlayRef} className="agent-conversation-composer">
             <div className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto">
               <div className="agent-composer-flow">
-                {slashMenuOpen && (
-                  <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
-                    <AgentCommandPalette commands={filteredSlashCommands} heading={t("home.commandPalette.commands")} selectedIndex={selectedCommandIndex} onSelect={selectSlashCommand} />
-                  </div>
-                )}
                 {statusPanel.open && !slashMenuOpen && (
                   <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-30 w-full" style={{ right: 0 }}>
                     <AgentStatusPanel state={statusPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={() => setStatusPanel({ open: false })} />
@@ -2898,6 +4492,45 @@ export function HomePage() {
                   </p>
                 ) : null}
                 <AgentOperationErrorSlot message={agentError} />
+                {/*
+                  Cards the user raised themselves sit with the buttons that
+                  raise them, directly above the composer, so they stay
+                  reachable instead of scrolling away up the transcript.
+                */}
+                <div ref={setRecordingBarTarget} className="legal-recording-bar-slot" />
+                <PluginCapabilityHost
+                  region="pinned"
+                  onRequestDiagnosis={generateLegalDiagnosis}
+                  onOpenArtifact={openLegalArtifact}
+                  calls={visiblePluginCalls}
+                  plugins={installedPlugins}
+                  client={clients?.plugins ?? null}
+                  uploadFiles={clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined}
+                  asrClient={clients?.asr}
+                  onRecordingSession={setRecordingSession}
+                  onRecordingArchived={archivePluginRecording}
+                  dismissedCallIds={dismissedPluginCalls}
+                  hiddenCallIds={hiddenPluginCalls}
+                  onCallHidden={hidePluginCall}
+                  onRegionWheelOverflow={scrollAgentConversationBy}
+                  onCallDismissed={dismissPluginCall}
+                  answeredInteractions={answeredPluginInteractions}
+                  onInteractionAnswered={rememberPluginInteraction}
+                />
+                {recordingEntry.compactOpen && !legalFlowCardOpen && !legalGuideOpen && panelRecorders.length === 0 ? <RecordingEntryCard
+                  session={recordingEntry.session}
+                  disabled={!clients?.asr}
+                  onClose={recordingEntry.closeCompact}
+                  onOpenList={() => { if (!recordingEntry.open) toggleRecordingEntry(); }}
+                /> : null}
+                <PinnedPluginCommandBar
+                  targets={legalFlowCardOpen ? [] : conversationPinnedCommands}
+                  disabled={!clients}
+                  active={openPinnedCapabilities}
+                  recordingOpen={recordingEntry.compactOpen || panelRecorders.some((call) => !hiddenPluginCalls.has(call.callId))}
+                  onRecordingPress={toggleCompactRecording}
+                  onPress={invokePinnedPluginCommand}
+                />
                 <div className="agent-composer-stack">
                   <AgentQueuedMessageList
                     items={currentQueuedMessages}
@@ -2915,6 +4548,9 @@ export function HomePage() {
                     onRemove={(clientRequestId) => void removeQueuedMessage(clientRequestId)}
                     onSteer={(clientRequestId) => void steerQueuedMessage(clientRequestId)}
                   />
+                  {currentTaskPlan ? (
+                    <AgentTaskPlanBar plan={currentTaskPlan} />
+                  ) : null}
                   {state.agent.currentChatId && currentGoal ? (
                     <AgentGoalBar
                       chatId={state.agent.currentChatId}
@@ -2925,40 +4561,53 @@ export function HomePage() {
                     />
                   ) : null}
                   <div
+                    ref={composerShellRef}
                     className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"
                     onDragOver={handleComposerDragOver}
                     onDrop={handleComposerDrop}
                   >
-                    <ComposerMediaPreviewStrip
-                      items={pendingAttachments}
-                      onRemove={removePendingMedia}
-                      removeLabel={t("common.remove")}
-                      selectedLabel={t("home.media.addPhotoFile")}
-                      t={t}
-                    />
+                    {pendingAttachments.length || contextChips.length ? (
+                      <div className="composer-context-attachments">
+                        <ComposerMediaPreviewStrip
+                          items={pendingAttachments}
+                          onRemove={removePendingMedia}
+                          removeLabel={t("common.remove")}
+                          selectedLabel={t("home.media.addPhotoFile")}
+                          t={t}
+                        />
+                        <HomeContextChips chips={contextChips} onRemove={removeComposerContextChip} />
+                      </div>
+                    ) : null}
                     <textarea
                       ref={inputRef}
                       value={composerInput}
                       placeholder={selectedComposerCommand ? t("home.goal.input") : t("home.input")}
                       rows={1}
                       onChange={(event) => {
-                        updateComposerInput(event.target.value);
+                        updateComposerInput(
+                          event.target.value,
+                          event.target.selectionStart,
+                          event.target.selectionEnd
+                        );
                         resizeComposerInput(event.target);
                       }}
                       onKeyDown={handleComposerKeyDown}
                       onPaste={handleComposerPaste}
                       className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
                     />
+                    {slashMenuOpen && !slashPickerOpen ? (
+                      <ComposerCaretMenu textareaRef={inputRef} containerRef={composerShellRef} value={composerInput} placement="above">
+                        <AgentCommandPalette
+                          commands={filteredSlashCommands}
+                          heading={t("home.commandPalette.commands")}
+                          selectedIndex={selectedCommandIndex}
+                          onSelect={selectSlashCommand}
+                        />
+                      </ComposerCaretMenu>
+                    ) : null}
                     <div className="agent-composer-toolbar">
-                      <div className="agent-composer-toolbar__leading">
-                        {selectedComposerCommand ? (
-                          <ComposerCommandChip
-                            command={selectedComposerCommand}
-                            label={t("home.command.goalChip")}
-                            removeLabel={t("common.remove")}
-                            onRemove={clearSelectedComposerCommand}
-                          />
-                        ) : null}
+                      <div className="agent-composer-toolbar__leading gap-1">
+                        {renderComposerLeadingActions()}
                       </div>
                       <div className="composer-actions">
                         <AgentModelSelector
@@ -2968,15 +4617,6 @@ export function HomePage() {
                           seedConfig={state.modelConfig}
                           onDefaultModelSelected={persistDefaultModel}
                         />
-                        <button
-                          type="button"
-                          aria-label={t("home.media.menu")}
-                          title={t("home.media.menu")}
-                          onClick={openMediaFilePicker}
-                          className="composer-action-btn"
-                        >
-                          <Plus size={15} strokeWidth={2} />
-                        </button>
                         <button
                           type="button"
                           aria-label={t("home.voiceInput")}
@@ -3002,11 +4642,23 @@ export function HomePage() {
               </div>
               <p className="text-center text-[11px] text-text-ink/40 mt-2">{t("home.notice")}</p>
               <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
+              <input
+                ref={(node) => {
+                  folderInputRef.current = node;
+                  node?.setAttribute("webkitdirectory", "");
+                }}
+                type="file"
+                multiple
+                hidden
+                className="hidden"
+                onChange={selectFolder}
+              />
             </div>
           </div>
         </section>
         )}
         {environmentPanel}
+        {previewPanel}
       </div>
     </AppFrame>
   );
@@ -3285,7 +4937,7 @@ export function ProjectTargetPicker(props: {
     }
   };
 
-  const handlePickerKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+  const handlePickerKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Enter" && isComposingKeyboardEvent(event)) return;
     if (event.key === "Tab") {
       props.onClose();
@@ -3450,6 +5102,12 @@ type HomeTranslate = (key: MessageKey, values?: MessageValues) => string;
 
 const defaultHomeTranslate: HomeTranslate = (key, values) => formatMessage(zhCNMessages[key], values);
 
+export function pluginInvocationError(error: unknown): string {
+  return error instanceof ApiRequestError && error.code
+    ? error.code
+    : error instanceof Error ? error.message : "network_unavailable";
+}
+
 export function agentErrorText(error: string | null, t: HomeTranslate = defaultHomeTranslate): string | null {
   if (!error) {
     return null;
@@ -3469,6 +5127,7 @@ export function agentErrorText(error: string | null, t: HomeTranslate = defaultH
 }
 
 const AGENT_OPERATION_ERROR_MESSAGE_KEYS: Record<string, MessageKey> = {
+  plugin_entitlement_required: "home.error.pluginEntitlementRequired",
   network_unavailable: "home.error.network",
   request_timeout: "home.error.timeout",
   project_directory_unavailable: "home.error.projectUnavailable",

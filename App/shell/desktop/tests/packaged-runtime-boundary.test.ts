@@ -359,7 +359,7 @@ describe("desktop packaged runtime boundaries", () => {
     }
   });
 
-  it("bundles the local embedding model in every desktop package variant", () => {
+  it("bundles local models and first-party plugins in every desktop package variant", () => {
     for (const configPath of [
       electronBuilderPath,
       unsignedElectronBuilderPath,
@@ -372,6 +372,11 @@ describe("desktop packaged runtime boundaries", () => {
       expect(config.extraResources).toContainEqual({
         from: "dist/embedding-models",
         to: "embedding-models",
+        filter: ["**/*"]
+      });
+      expect(config.extraResources).toContainEqual({
+        from: "dist/bundled-plugins",
+        to: "bundled-plugins",
         filter: ["**/*"]
       });
     }
@@ -1061,6 +1066,30 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('"X-Memmy-Agent-Auth": gateway.bootstrapSecret');
     expect(mainSource).toContain("Authorization: `Bearer ${bearer}`");
     expect(mainSource).toContain("if (response.status === 401)");
+  });
+
+  it("exposes native operating-system file icons for real local files", () => {
+    const mainSource = readFileSync(mainSourcePath, "utf8");
+    const preloadSource = readFileSync(preloadSourcePath, "utf8");
+    const interfaceSource = readFileSync(desktopInterfacePath, "utf8");
+
+    expect(interfaceSource).toContain("export type DesktopSystemFileIconResult = string | null;");
+    expect(preloadSource).toContain("getPathForFile(file: File): string;");
+    expect(preloadSource).toContain("getSystemFileIcon(filePath: string): Promise<DesktopSystemFileIconResult>;");
+    expect(preloadSource).toContain("getSystemFolderIcon(kind: DesktopSystemFolderIconKind): Promise<DesktopSystemFileIconResult>;");
+    expect(preloadSource).toContain("showItemInFolder(filePath: string): Promise<void>;");
+    expect(preloadSource).toContain("webUtils.getPathForFile(file)");
+    expect(preloadSource).toContain('ipcRenderer.invoke("memmy:get-system-file-icon", filePath)');
+    expect(preloadSource).toContain('ipcRenderer.invoke("memmy:get-system-folder-icon", kind)');
+    expect(preloadSource).toContain('ipcRenderer.invoke("memmy:show-item-in-folder", filePath)');
+    expect(mainSource).toContain('ipcMain.handle("memmy:get-system-file-icon"');
+    expect(mainSource).toContain('ipcMain.handle("memmy:get-system-folder-icon"');
+    expect(mainSource).toContain('ipcMain.handle("memmy:show-item-in-folder"');
+    expect(mainSource).toContain("shell.showItemInFolder(target)");
+    expect(mainSource).toContain('app.getFileIcon(filePath, { size: "large" })');
+    expect(mainSource).toContain('ipcMain.removeHandler("memmy:get-system-file-icon")');
+    expect(mainSource).toContain('ipcMain.removeHandler("memmy:get-system-folder-icon")');
+    expect(mainSource).toContain('ipcMain.removeHandler("memmy:show-item-in-folder")');
   });
 
   it("uses packaged .cmd launchers on Windows and keeps the macOS profile flow", () => {

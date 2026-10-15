@@ -3744,6 +3744,39 @@ describe("agent chat slice", () => {
     expect(state.goalState).toEqual(activeGoal);
   });
 
+  it("persists task plan progress per chat and restores it when switching chats", () => {
+    const taskPlan = {
+      plan_id: "32f2868d-ae25-4f47-b33b-17f474eecc3a",
+      title: "Generate literature review",
+      status: "active" as const,
+      items: [
+        { id: "evidence", content: "Map evidence", status: "completed" as const },
+        { id: "sections", content: "Generate sections", status: "in_progress" as const },
+      ],
+      created_at: "2026-09-14T06:00:00.000Z",
+      updated_at: "2026-09-14T06:05:00.000Z",
+    };
+    let state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "chat-1" },
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "task_plan_state",
+        chat_id: "chat-1",
+        task_plan_state: taskPlan,
+      },
+    });
+    expect(state.taskPlanState).toEqual(taskPlan);
+    expect(state.taskPlanStatesByChatId["chat-1"]).toEqual(taskPlan);
+
+    state = agentReducer(state, { type: "agent/newChatCreated", chatId: "chat-2" });
+    expect(state.taskPlanState).toBeNull();
+    state = agentReducer(state, { type: "agent/newChatCreated", chatId: "chat-1" });
+    expect(state.taskPlanState).toEqual(taskPlan);
+  });
+
   it("keeps a per-Goal clock stable through settlement updates and clears it on the matching Turn end", () => {
     let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
@@ -4459,19 +4492,23 @@ describe("agent chat slice", () => {
     expect(state.tasks.find((task) => task.chatId === "chat-1")?.runStartedAt).toBe(1780732800);
   });
 
-  it("keeps composer drafts and pending attachments isolated by scope", () => {
+  it("keeps composer drafts, pending attachments, and context references isolated by scope", () => {
     const attachment = readyPendingFile("report.pdf");
+    const reference = { kind: "path" as const, id: "docs/report.pdf", label: "report.pdf" };
     let state = agentReducer(initialAgentState, { type: "agent/composerDraftUpdated", scopeKey: "chat-a", value: "A 草稿" });
     state = agentReducer(state, { type: "agent/composerDraftUpdated", scopeKey: "chat-b", value: "B 草稿" });
     state = agentReducer(state, { type: "agent/composerPendingAttachmentsUpdated", scopeKey: "chat-a", attachments: [attachment] });
+    state = agentReducer(state, { type: "agent/composerContextReferencesUpdated", scopeKey: "chat-a", references: [reference] });
 
     expect(state.composerDraftsByScope).toEqual({ "chat-a": "A 草稿", "chat-b": "B 草稿" });
     expect(state.composerPendingAttachmentsByScope["chat-a"]).toEqual([attachment]);
+    expect(state.composerContextReferencesByScope["chat-a"]).toEqual([reference]);
 
     state = agentReducer(state, { type: "agent/composerScopeCleared", scopeKey: "chat-a" });
 
     expect(state.composerDraftsByScope).toEqual({ "chat-b": "B 草稿" });
     expect(state.composerPendingAttachmentsByScope["chat-a"]).toBeUndefined();
+    expect(state.composerContextReferencesByScope["chat-a"]).toBeUndefined();
   });
 
   it("newChatRequested does not clear composer scopes", () => {
@@ -5627,6 +5664,85 @@ describe("agent chat slice", () => {
     expect(state.runStartedAtByChatId["chat-1"]).toBe(4_000);
     expect(state.activeTurnIdByChatId["chat-1"]).toBe("turn-new");
     expect(state.isSending).toBe(true);
+  });
+
+  it("preserves structured Agent UI on live and hydrated assistant messages", () => {
+    const agentUi = {
+      questionCard: {
+        version: 1,
+        requestId: "question-1",
+        questions: [{
+          id: "choice",
+          prompt: "请选择",
+          options: [{ id: "a", label: "A" }, { id: "b", label: "B" }],
+          allowMultiple: false,
+          allowOther: true
+        }]
+      }
+    };
+    let live = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "chat-1" }
+    });
+    live = agentReducer(live, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message",
+        chat_id: "chat-1",
+        content: "请选择",
+        agent_ui: agentUi
+      }
+    });
+
+    expect(live.messages[0]?.agentUi).toEqual(agentUi);
+    live = agentReducer(live, {
+      type: "agent/wsEvent",
+      event: {
+        event: "agent_question_response",
+        chat_id: "chat-1",
+        request_id: "question-1",
+        answers: [{ questionId: "choice", selectedOptionIds: ["a"] }]
+      }
+    });
+    expect(live.messages[0]?.questionResponse).toEqual({
+      requestId: "question-1",
+      answers: [{ questionId: "choice", selectedOptionIds: ["a"] }]
+    });
+
+    const hydrated = loadHistory(initialAgentState, "websocket:chat-1", [{
+      role: "assistant",
+      content: "请选择",
+      agent_ui: agentUi,
+      questionResponse: {
+        requestId: "question-1",
+        answers: [{ questionId: "choice", selectedOptionIds: ["b"] }]
+      }
+    }]);
+    expect(hydrated.messages[0]?.agentUi).toEqual(agentUi);
+    expect(hydrated.messages[0]?.questionResponse).toEqual({
+      requestId: "question-1",
+      answers: [{ questionId: "choice", selectedOptionIds: ["b"] }]
+    });
+  });
+
+  it("records consumed plugin feedback without queuing a second turn", () => {
+    let state = agentReducer(initialAgentState, {
+      type: "agent/newChatCreated",
+      chatId: "chat-1"
+    });
+    state = agentReducer(state, {
+      type: "agent/pluginFeedbackRecorded",
+      chatId: "chat-1",
+      content: "Please refine this card",
+      clientRequestId: "feedback-1"
+    });
+    expect(state.messages.at(-1)).toMatchObject({
+      role: "user",
+      content: "Please refine this card",
+      clientRequestId: "feedback-1"
+    });
+    expect(state.queuedMessagesByChatId["chat-1"]).toBeUndefined();
+    expect(state.optimisticSendingByChatId["chat-1"]).toBeUndefined();
   });
 });
 

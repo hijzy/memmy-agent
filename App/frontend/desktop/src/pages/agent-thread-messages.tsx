@@ -63,6 +63,15 @@ import {
   isAgentModelErrorContent,
   shouldSuppressRetryWaitStatus,
 } from "./agent-model-error.js";
+import {
+  AgentQuestionCard,
+  normalizeAgentQuestionResponse,
+  readAgentQuestionCard,
+  readAgentQuestionResponse,
+  visibleAgentQuestionResponseContent,
+  type AgentQuestionCardPayload,
+  type AgentQuestionResponse,
+} from "./agent-question-card.js";
 
 interface AgentThreadMessagesProps {
   messages: AgentChatMessage[];
@@ -75,8 +84,10 @@ interface AgentThreadMessagesProps {
   chatScopeKey: string;
   historyVersion?: number;
   isSending?: boolean;
+  waitingForPluginInteraction?: boolean;
   sanitizePlatformApiErrors?: boolean;
   memoryRuntimeClient?: Pick<MemoryRuntimeClient, "recallEvidence" | "deleteMemory"> | null;
+  onAnswerQuestion?: (card: AgentQuestionCardPayload, response: AgentQuestionResponse) => Promise<boolean> | boolean;
 }
 
 export type AgentDisplayUnit =
@@ -141,6 +152,15 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
     () => findRecallEvidenceUserAnchors(units, { isSending: props.isSending }),
     [props.isSending, units]
   );
+  const questionResponses = useMemo(() => {
+    const responses = new Map<string, AgentQuestionResponse>();
+    for (const message of props.messages) {
+      if (message.role !== "user") continue;
+      const response = readAgentQuestionResponse(message.content);
+      if (response) responses.set(response.requestId, response);
+    }
+    return responses;
+  }, [props.messages]);
   const [manualOpenByActivityKey, setManualOpenByActivityKey] = useState<Record<string, boolean | undefined>>({});
   const previousRunningByActivityKey = useRef<Record<string, boolean>>({});
   const activityRunningByKey = useMemo(() => {
@@ -224,13 +244,18 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
               sanitizePlatformApiErrors={props.sanitizePlatformApiErrors === true}
               memoryRuntimeClient={props.memoryRuntimeClient}
               recallEvidenceTurnId={recallEvidenceAnchors.get(index)}
+              questionResponse={normalizeAgentQuestionResponse(unit.message.questionResponse)
+                ?? (readAgentQuestionCard(unit.message.agentUi)
+                  ? questionResponses.get(readAgentQuestionCard(unit.message.agentUi)!.requestId) ?? null
+                  : null)}
+              onAnswerQuestion={props.onAnswerQuestion}
             />
             {unit.message.id === props.afterMessageId ? props.afterMessageContent : null}
           </Fragment>
         );
       })}
       {shouldShowThinkingPlaceholder(props.messages, props.isSending) && (
-        <ThinkingPlaceholder />
+        props.waitingForPluginInteraction ? <PluginInteractionWaitingPlaceholder /> : <ThinkingPlaceholder />
       )}
     </>
   );
@@ -244,10 +269,12 @@ function areAgentThreadMessagesPropsEqual(previous: AgentThreadMessagesProps, ne
     && previous.artifactClient === next.artifactClient
     && previous.chatScopeKey === next.chatScopeKey
     && previous.historyVersion === next.historyVersion
+    && previous.waitingForPluginInteraction === next.waitingForPluginInteraction
     && previous.isSending === next.isSending
     && previous.retryWaitStatus === next.retryWaitStatus
     && previous.sanitizePlatformApiErrors === next.sanitizePlatformApiErrors
-    && previous.memoryRuntimeClient === next.memoryRuntimeClient;
+    && previous.memoryRuntimeClient === next.memoryRuntimeClient
+    && previous.onAnswerQuestion === next.onAnswerQuestion;
 }
 
 export function buildAgentDisplayUnits(messages: AgentChatMessage[], options: { chatScopeKey: string; retryWaitStatus?: AgentRetryWaitStatus | null }): AgentDisplayUnit[] {
@@ -436,6 +463,8 @@ interface SingleMessageProps {
   sanitizePlatformApiErrors?: boolean;
   memoryRuntimeClient?: Pick<MemoryRuntimeClient, "recallEvidence" | "deleteMemory"> | null;
   recallEvidenceTurnId?: string;
+  questionResponse?: AgentQuestionResponse | null;
+  onAnswerQuestion?: (card: AgentQuestionCardPayload, response: AgentQuestionResponse) => Promise<boolean> | boolean;
 }
 
 const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
@@ -446,9 +475,11 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
   }
 
   if (message.role === "user") {
-    const hasContent = message.content.trim().length > 0;
+    if (readAgentQuestionResponse(message.content)) return null;
+    const visibleContent = visibleAgentQuestionResponseContent(message.content);
+    const hasContent = visibleContent.trim().length > 0;
     const timestamp = messageTimestamp(message.createdAt, language, t);
-    const copyAction = <MessageBubbleCopyButton text={message.content} align="right" timestamp={timestamp} />;
+    const copyAction = <MessageBubbleCopyButton text={visibleContent} align="right" timestamp={timestamp} />;
     return (
       <div className="agent-user-turn flex min-w-0 justify-end">
         <div className="flex min-w-0 max-w-[75%] flex-col items-end gap-2 w-full">
@@ -458,7 +489,7 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
           {hasContent ? (
             <div className="agent-chat-bubble-frame agent-chat-bubble-frame--user w-full max-w-full min-w-0">
               <div className="agent-chat-bubble agent-chat-bubble--user max-w-full min-w-0 overflow-hidden px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-                {message.content}
+                {visibleContent}
               </div>
               {props.recallEvidenceTurnId && props.memoryRuntimeClient ? (
                 <TurnRecallEvidence
@@ -505,6 +536,23 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
           content={message.content}
           modelError={message.modelError}
         />
+      </div>
+    );
+  }
+
+  const questionCard = readAgentQuestionCard(message.agentUi);
+  if (questionCard) {
+    return (
+      <div className="flex min-w-0 justify-start">
+        <div className="min-w-0 w-full">
+          <AgentQuestionCard
+            card={questionCard}
+            response={props.questionResponse}
+            onSubmit={props.onAnswerQuestion
+              ? (response) => props.onAnswerQuestion!(questionCard, response)
+              : undefined}
+          />
+        </div>
       </div>
     );
   }
@@ -959,6 +1007,8 @@ function areSingleMessagePropsEqual(previous: SingleMessageProps, next: SingleMe
     && previous.forceMessageActions === next.forceMessageActions
     && previous.memoryRuntimeClient === next.memoryRuntimeClient
     && previous.recallEvidenceTurnId === next.recallEvidenceTurnId
+    && previous.questionResponse === next.questionResponse
+    && previous.onAnswerQuestion === next.onAnswerQuestion
     && previous.deferContentRender === next.deferContentRender
     && previous.deferredRevealDelayMs === next.deferredRevealDelayMs
     && previous.sanitizePlatformApiErrors === next.sanitizePlatformApiErrors;
@@ -1254,6 +1304,11 @@ function CodexCheckIcon(props: SVGProps<SVGSVGElement>) {
       />
     </svg>
   );
+}
+
+function PluginInteractionWaitingPlaceholder() {
+  const { t } = useTranslation();
+  return <p role="status" className="text-sm text-text-ink/55">{t("plugin.ui.waitingForResponse")}</p>;
 }
 
 function ThinkingPlaceholder() {

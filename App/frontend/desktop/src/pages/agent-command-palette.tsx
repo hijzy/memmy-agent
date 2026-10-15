@@ -1,16 +1,21 @@
 import {
   Activity,
+  AudioLines,
   BookOpen,
   Brain,
   CircleQuestionMark,
+  FileText,
   GitBranch,
   History,
+  Mic,
   RotateCw,
+  Scale,
   Shield,
   Sparkles,
   Square,
   SquarePen,
   Undo2,
+  Workflow,
   type LucideIcon
 } from "lucide-react";
 import type { MemmyAgentSlashCommand } from "../api/memmy-agent-client.js";
@@ -41,18 +46,37 @@ export interface SlashCommandStorageLike {
 
 const iconByName: Record<string, LucideIcon> = {
   activity: Activity,
+  "audio-lines": AudioLines,
   "book-open": BookOpen,
   brain: Brain,
   "circle-help": CircleQuestionMark,
+  "file-text": FileText,
   "git-branch": GitBranch,
   history: History,
+  mic: Mic,
   "rotate-cw": RotateCw,
+  scale: Scale,
   shield: Shield,
   sparkles: Sparkles,
   square: Square,
   "square-pen": SquarePen,
-  "undo-2": Undo2
+  "undo-2": Undo2,
+  workflow: Workflow
 };
+
+/**
+ * Resolves an icon name declared by a plugin to a renderable icon.
+ *
+ * Plugins name an icon rather than shipping one, so the set is whatever this
+ * map allows. An unknown name falls back rather than failing, since a manifest
+ * can outlive the build that knows its icon.
+ *
+ * @param name The icon name from a manifest, if any.
+ * @returns The icon component to render.
+ */
+export function resolveContributionIcon(name: string | undefined): LucideIcon {
+  return (name ? iconByName[name] : undefined) ?? Activity;
+}
 
 const localizedBuiltinCommandKeys: Record<string, { title: MessageKey; description: MessageKey; hideArgHint?: boolean }> = {
   "/new": {
@@ -148,7 +172,7 @@ export function AgentCommandPalette(props: AgentCommandPaletteProps) {
         style={{ maxHeight: "min(432px, calc(100vh - 260px))" }}
       >
         {props.commands.map((command, index) => {
-          const Icon = iconByName[command.icon] ?? Activity;
+          const Icon = resolveContributionIcon(command.icon);
           const selected = index === props.selectedIndex;
           return (
             <button
@@ -178,11 +202,8 @@ export function AgentCommandPalette(props: AgentCommandPaletteProps) {
 }
 
 export function slashQueryFromInput(input: string): string | null {
-  if (!input.startsWith("/")) {
-    return null;
-  }
-  const token = input.slice(1);
-  return /\s/.test(token) ? null : token.toLowerCase();
+  const match = /(?:^|\s)\/([^\s/]*)$/.exec(input);
+  return match ? (match[1] ?? "").toLowerCase() : null;
 }
 
 export function buildVisibleSlashCommands(

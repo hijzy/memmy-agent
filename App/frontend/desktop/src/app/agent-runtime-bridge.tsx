@@ -581,7 +581,8 @@ export function isAgentRuntimeBridgeRoute(path: AppRoutePath): boolean {
     || path === "/tools"
     || path === "/settings"
     || path === "/memory"
-    || path === "/memory-sources";
+    || path === "/memory-sources"
+    || path === "/plugin";
 }
 
 /** Handles agent runtime bridge. */

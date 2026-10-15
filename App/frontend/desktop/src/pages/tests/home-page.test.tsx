@@ -4,41 +4,65 @@ import { fileURLToPath } from "node:url";
 import { Window } from "happy-dom";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { MemmyAgentMessageRejectedError } from "../../api/memmy-agent-client.js";
+import { InstalledPluginSchema } from "@memmy/local-api-contracts";
+import { ApiRequestError } from "../../api/http.js";
+import { MemmyAgentMessageRejectedError, MemmyAgentRequestError } from "../../api/memmy-agent-client.js";
 import { AgentRuntimeBridge } from "../../app/agent-runtime-bridge.js";
 import { AppProviders } from "../../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY } from "../../app/routes.js";
+import type { PluginUiCall } from "../../app/plugin-ui-context.js";
 import type { SlashCommandPaletteItem, SlashCommandStorageLike } from "../agent-command-palette.js";
 import { buildAgentDisplayUnits } from "../agent-thread-messages.js";
 import {
   AGENT_RESTART_STATE_STORAGE_KEY,
   AGENT_MEDIA_ACCEPT,
   ComposerCommandChip,
+  addCapabilityBlockToDraft,
+  appendPluginArtifact,
   ComposerMediaPreviewStrip,
   ComposerSubmitButton,
   HomePage,
   AgentOperationErrorSlot,
   agentComposerPrimaryAction,
   agentErrorText,
+  pluginInvocationError,
   agentStatusText,
   agentChatScopeKey,
   attachmentFilesFromDataTransfer,
   buildComposerCommandDraft,
+  buildAgentRoutedPluginPrompt,
+  collectPluginCommandTargets,
+  collectPluginScenarios,
+  selectPinnedPluginCommands,
+  selectConversationPinnedCommands,
+  selectPluginCallsForConversation,
+  selectRecordingDeliveryFiles,
+  selectRecordingMaterialFiles,
+  selectSlashPluginCommands,
+  selectTopbarPluginCommand,
+  selectOpenPinnedCapabilities,
+  selectPinnedToggleCall,
+  pressPinnedPluginCommand,
   clipboardAttachmentFilesFromDataTransfer,
   dataTransferHasAttachmentFiles,
   hasActiveAgentConversation,
+  homeSuggestionDraft,
   hydrateAgentThreadInBackground,
+  insertCapabilityAtSelection,
   isAgentConversationAtBottom,
   isComposingKeyboardEvent,
   isSingleLineComposerInput,
   isSteerableCurrentTurn,
   parseStoredAgentRestartState,
+  parsePluginCommandInvocation,
   parseComposerCommandDraft,
   readFocusedAgentChatId,
   requestNewSessionReset,
   requestAgentRestart,
   requestAgentStop,
   resolveComposerCommandDraft,
+  replaceSlashQueryAtSelection,
+  replaceTrailingSlashQuery,
   shouldAcceptAgentStatusResult,
   submitAgentComposerMessage,
   updateAgentComposerOverlayHeight,
@@ -50,10 +74,16 @@ import {
   validateAgentMediaFiles,
   type PendingFileAttachment
 } from "../home-page.js";
+import {
+  ComposerHighlightedTextarea,
+  composerHighlightSegments,
+  removeHighlightedCommandAtCaret
+} from "../home-composer-quick-actions.js";
 
 const homePageSourcePath = fileURLToPath(new URL("../home-page.tsx", import.meta.url));
 const agentRuntimeBridgeSourcePath = fileURLToPath(new URL("../../app/agent-runtime-bridge.tsx", import.meta.url));
 const agentModelSelectorSourcePath = fileURLToPath(new URL("../../components/agent-model-selector.tsx", import.meta.url));
+const pluginCapabilityHostSourcePath = fileURLToPath(new URL("../plugin-capability-host.tsx", import.meta.url));
 const stylesSourcePath = fileURLToPath(new URL("../../styles.css", import.meta.url));
 
 function readAgentRuntimeBridgeSource(): string {
@@ -69,12 +99,424 @@ function mockCallOrder(fn: { mock: { invocationCallOrder: readonly number[] } },
 }
 
 describe("HomePage", () => {
+  it("keeps plugin cards scoped to the active chat during navigation", () => {
+    const calls: PluginUiCall[] = [
+      { pluginId: "legal-labor", capabilityId: "session-start", callId: "chat-1-call", conversationId: "websocket:chat-1", origin: "agent", events: [] },
+      { pluginId: "legal-labor", capabilityId: "material-collect", callId: "chat-2-call", conversationId: "websocket:chat-2", origin: "agent", events: [] },
+    ];
+
+    expect(selectPluginCallsForConversation(calls, "chat-1", "websocket:chat-1", "draft-1").map((call) => call.callId))
+      .toEqual(["chat-1-call"]);
+    expect(selectPluginCallsForConversation(calls, "chat-2", "websocket:chat-1", "draft-1").map((call) => call.callId))
+      .toEqual(["chat-2-call"]);
+  });
+
+  it("stages only the transcript of a recording as a diagnosis material", () => {
+    const files = selectRecordingMaterialFiles({
+      id: "rec-1", title: "访谈录音", recordedAt: "2026-10-13T11:35:16Z", durationMs: 4000, speakerCount: 1,
+      transcript: { text: "对。", segments: [] }, status: "ready", sessionKey: "websocket:chat-1", collected: true,
+      files: [
+        { kind: "audio", path: "/media/interview.webm", name: "访谈录音.webm", mime: "audio/webm", bytes: 10, url: "/audio" },
+        { kind: "file", path: "/media/interview.txt", name: "访谈转写.txt", mime: "text/plain", bytes: 20, url: "/text" }
+      ]
+    });
+
+    expect(files.map((file) => [file.name, file.collected])).toEqual([["访谈转写.txt", true]]);
+  });
+
+  it("hands over this conversation's finished recordings, oldest first", () => {
+    const entry = (id: string, recordedAt: string, sessionKey: string, status?: "transcribing") => ({
+      id, title: id, recordedAt, durationMs: 1000, speakerCount: 1, transcript: { text: "", segments: [] }, audioUrl: null, sessionKey,
+      ...(status ? { status } : {}),
+      files: [
+        { kind: "audio" as const, path: `/ws/recordings/${id}.webm`, name: `${id}.webm`, mime: "audio/webm" as const, bytes: 10, url: `/a/${id}` },
+        { kind: "file" as const, path: `/ws/recordings/${id}.txt`, name: `${id}.txt`, mime: "text/plain" as const, bytes: 10, url: `/t/${id}` }
+      ]
+    });
+    const recordings = [
+      entry("later", "2026-10-13T12:00:00Z", "websocket:chat-1"),
+      entry("earlier", "2026-10-13T11:00:00Z", "chat-1"),
+      entry("pending", "2026-10-13T13:00:00Z", "websocket:chat-1", "transcribing"),
+      entry("other", "2026-10-13T10:00:00Z", "websocket:chat-2")
+    ];
+
+    expect(selectRecordingDeliveryFiles(recordings, "chat-1").map((file) => file.name))
+      .toEqual(["earlier.webm", "earlier.txt", "later.webm", "later.txt"]);
+    expect(selectRecordingDeliveryFiles(recordings, "chat-1")[1]).toMatchObject({ path: "/ws/recordings/earlier.txt", mediaType: "text/plain" });
+    expect(selectRecordingDeliveryFiles(recordings, null)).toEqual([]);
+  });
+
+  it("adds the published workspace path for a hosted plugin artifact", () => {
+    expect(appendPluginArtifact("Inspect", {
+      id: "review",
+      name: "review.pdf",
+      mediaType: "application/pdf",
+      uri: "/api/v1/plugins/literature-review/artifacts/token/preview",
+      path: "/workspace/outputs/literature-review/review-1/review.pdf"
+    })).toBe("Inspect\nreview.pdf: /workspace/outputs/literature-review/review-1/review.pdf");
+  });
+
+  it("registers only active non-reserved plugin commands and parses their arguments", () => {
+    const plugin = InstalledPluginSchema.parse({
+      id: "com.example.review",
+      version: "1.0.0",
+      manifest: {
+        apiVersion: "memmy/v1",
+        id: "com.example.review",
+        name: "Review",
+        version: "1.0.0",
+        runtime: { adapter: "http" },
+        capabilities: [{ id: "run", name: "Run", description: "Run", inputSchema: {}, outputSchema: {}, execution: "job" }],
+        commands: [
+          { command: "/review", name: "Review", description: "Create a review", capabilityId: "run" },
+          { command: "/status", name: "Bad collision", description: "Reserved", capabilityId: "run" }
+        ],
+        permissions: []
+      },
+      state: "active",
+      approvedPermissions: [],
+      config: {},
+      lastError: null,
+      createdAt: "2026-08-31T00:00:00.000Z",
+      updatedAt: "2026-08-31T00:00:00.000Z"
+    });
+    const targets = collectPluginCommandTargets([plugin], ["/status"]);
+    expect(targets.map((item) => item.command.command)).toEqual(["/review"]);
+    expect(parsePluginCommandInvocation("/review agent memory", targets)).toMatchObject({ arguments: "agent memory", plugin });
+  });
+
+  it("pins only the commands that asked to be pinned", () => {
+    const plugin = InstalledPluginSchema.parse({
+      id: "com.example.review",
+      version: "1.0.0",
+      manifest: {
+        apiVersion: "memmy/v1",
+        id: "com.example.review",
+        name: "Review",
+        version: "1.0.0",
+        runtime: { adapter: "http" },
+        capabilities: [{ id: "run", name: "Run", description: "Run", inputSchema: {}, outputSchema: {}, execution: "job" }],
+        commands: [
+          { command: "/guide", name: "Guidance", description: "Open the guidance card", capabilityId: "run", pinned: true },
+          { command: "/record", name: "Record", description: "Record an interview", capabilityId: "run", pinned: true },
+          { command: "/review", name: "Review", description: "Create a review", capabilityId: "run" }
+        ],
+        permissions: []
+      },
+      state: "active",
+      approvedPermissions: [],
+      config: {},
+      lastError: null,
+      createdAt: "2026-08-31T00:00:00.000Z",
+      updatedAt: "2026-08-31T00:00:00.000Z"
+    });
+    const targets = collectPluginCommandTargets([plugin]);
+
+    // A pinned button is a shortcut for the same command, so it is selected
+    // from the same targets the slash commands resolve against.
+    expect(selectPinnedPluginCommands(targets).map((item) => item.command.command)).toEqual(["/guide", "/record"]);
+    // Plugins that pin nothing must leave the composer layout alone.
+    expect(selectPinnedPluginCommands(targets.filter((item) => item.command.command === "/review"))).toEqual([]);
+    // A pinned command already has a button; listing it in the palette too
+    // would offer the same action twice.
+    expect(selectSlashPluginCommands(targets).map((item) => item.command.command)).toEqual(["/review"]);
+  });
+
+  it("puts a top-bar button up only for a plugin that asked for one", () => {
+    const pluginWith = (id: string, command: string, topbar?: boolean) => InstalledPluginSchema.parse({
+      id,
+      version: "1.0.0",
+      manifest: {
+        apiVersion: "memmy/v1",
+        id,
+        name: id,
+        version: "1.0.0",
+        runtime: { adapter: "http" },
+        capabilities: [{ id: "run", name: "Run", description: "Run", inputSchema: {}, outputSchema: {}, execution: "job" }],
+        commands: [{
+          command,
+          name: "Record",
+          description: "Record an interview",
+          capabilityId: "run",
+          ...(topbar === undefined ? {} : { topbar })
+        }],
+        permissions: []
+      },
+      state: "active",
+      approvedPermissions: [],
+      config: {},
+      lastError: null,
+      createdAt: "2026-08-31T00:00:00.000Z",
+      updatedAt: "2026-08-31T00:00:00.000Z"
+    });
+
+    // The top bar belongs to the conversation, so a plugin that never asked is
+    // not given a button there — the recording entry is opt-in per plugin.
+    expect(selectTopbarPluginCommand(collectPluginCommandTargets([pluginWith("com.example.a", "/record")]))).toBeNull();
+    expect(
+      selectTopbarPluginCommand(collectPluginCommandTargets([pluginWith("com.example.a", "/record", true)]))?.command.command
+    ).toBe("/record");
+    // Only one button fits the slot, so the first claim wins rather than two
+    // buttons leaving the user to guess.
+    expect(
+      selectTopbarPluginCommand(collectPluginCommandTargets([
+        pluginWith("com.example.a", "/record", true),
+        pluginWith("com.example.b", "/other", true)
+      ]))?.command.command
+    ).toBe("/record");
+  });
+
+  it("finds the pending card a pinned button can hide or restore", () => {
+    const call = (callId: string, origin: "user" | "agent", events: PluginUiCall["events"]): PluginUiCall => ({
+      pluginId: "com.example.review",
+      capabilityId: "run",
+      callId,
+      conversationId: "websocket:chat-1",
+      origin,
+      events
+    });
+    const live: PluginUiCall["events"] = [
+      { type: "interaction", request: { interactionId: "guide", type: "question", payload: {} } }
+    ];
+    const finished: PluginUiCall["events"] = [{ type: "result", output: {} }];
+
+    // A live card the user opened is what the button closes.
+    expect(selectPinnedToggleCall([call("live", "user", live)], "com.example.review", "run")).toBe("live");
+    // An Agent's question is not this button's to close, even under the same
+    // plugin and capability: the Agent is still waiting on the answer.
+    expect(selectPinnedToggleCall([call("asked", "agent", live)], "com.example.review", "run")).toBeNull();
+    expect(selectPinnedToggleCall(
+      [call("asked", "agent", live)],
+      "com.example.review",
+      "run",
+      undefined,
+      new Set(["com.example.review:run"])
+    )).toBe("asked");
+    // A card that already delivered has nothing left to close, so its button
+    // goes back to opening a new one.
+    expect(selectPinnedToggleCall([call("done", "user", finished)], "com.example.review", "run")).toBeNull();
+    // Another plugin's card must not be mistaken for this button's.
+    expect(selectPinnedToggleCall([call("live", "user", live)], "com.example.other", "run")).toBeNull();
+    // With both on screen the newest is the one the button just opened.
+    expect(
+      selectPinnedToggleCall([call("older", "user", live), call("newer", "user", live)], "com.example.review", "run")
+    ).toBe("newer");
+    // A card the user just closed is still in the call list until the plugin's
+    // cancellation comes back. It is not something a press can close again, so
+    // counting it would turn the next press into a no-op instead of reopening.
+    expect(
+      selectPinnedToggleCall([call("closed", "user", live)], "com.example.review", "run", new Set(["closed"]))
+    ).toBeNull();
+    // With the closed one out of the way the press finds the card still open.
+    expect(
+      selectPinnedToggleCall(
+        [call("closed", "user", live), call("open", "user", live)],
+        "com.example.review",
+        "run",
+        new Set(["closed"])
+      )
+    ).toBe("open");
+  });
+
+  it("opens a fresh card only when there is no pending call to restore", async () => {
+    const open = vi.fn(async () => undefined);
+    const toggleVisibility = vi.fn();
+    const options = { calls: [] as PluginUiCall[], pluginId: "legal-labor", capabilityId: "session-start", pinnedCapabilities: new Set(["legal-labor:session-start"]), open, toggleVisibility };
+    await pressPinnedPluginCommand(options);
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(toggleVisibility).not.toHaveBeenCalled();
+    const pending: PluginUiCall = { pluginId: "legal-labor", capabilityId: "session-start", callId: "pending", origin: "agent", events: [] };
+    expect(selectOpenPinnedCapabilities([pending], undefined, options.pinnedCapabilities, new Set(["pending"]))).toEqual(new Set());
+    await pressPinnedPluginCommand({ ...options, calls: [pending] });
+    expect(toggleVisibility).toHaveBeenCalledWith("pending");
+    expect(open).toHaveBeenCalledTimes(1);
+    await pressPinnedPluginCommand({ ...options, calls: [{ ...pending, events: [{ type: "result", result: { sessionId: "session-1" } }] }] });
+    expect(open).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops highlighting a pinned button the moment its card is closed", () => {
+    const openCall = (callId: string): PluginUiCall => ({
+      pluginId: "com.example.review",
+      capabilityId: "run",
+      callId,
+      conversationId: "websocket:chat-1",
+      origin: "user",
+      events: [{ type: "interaction", request: { interactionId: "guide", type: "question", payload: {} } }]
+    });
+
+    // The cancellation round trip takes a moment, so the button cannot wait for
+    // it to stop looking pressed: the card is already gone from the screen.
+    expect(selectOpenPinnedCapabilities([openCall("live")])).toEqual(new Set(["com.example.review:run"]));
+    expect(selectOpenPinnedCapabilities([openCall("live")], new Set(["live"]))).toEqual(new Set());
+    const agentCall = { ...openCall("agent"), origin: "agent" as const };
+    expect(selectOpenPinnedCapabilities([agentCall], undefined, new Set(["com.example.review:run"]))).toEqual(new Set(["com.example.review:run"]));
+  });
+
+  it("keeps the conversation reachable when a pinned card is on screen", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const styles = readFileSync(stylesSourcePath, "utf8");
+
+    // The overlay sits on top of the scroller, so a card tall enough to reach
+    // the pane's top would otherwise take the wheel with it and leave the
+    // conversation above it unreachable.
+    expect(styles).toMatch(/\.plugin-capability-region--pinned\s*\{[^}]*max-height:/s);
+    expect(styles).toMatch(/\.plugin-capability-region--pinned\s*\{[^}]*overflow-y:\s*auto;/s);
+
+    // Only the controls take the pointer; the backdrop between them lets a
+    // gesture through to the transcript underneath.
+    expect(styles).toMatch(/\.agent-conversation-composer\s*>\s*\*\s*\{[^}]*pointer-events:\s*none;/s);
+    expect(styles).toMatch(/\.agent-conversation-composer\s*>\s*\*\s*>\s*\*\s*\{[^}]*pointer-events:\s*auto;/s);
+
+    // The pinned host is the one that carries the cap.
+    const host = readFileSync(pluginCapabilityHostSourcePath, "utf8");
+    expect(host).toContain("plugin-capability-region plugin-capability-region--pinned");
+    // A card closed from its button must stay closed rather than being
+    // replaced by the cancellation it caused.
+    expect(host).toContain("props.dismissedCallIds?.has(call.callId)");
+    expect(source).toContain("dismissedCallIds={dismissedPluginCalls}");
+  });
+
+  it("collects scenario entry cards only from plugins that can serve them", () => {
+    const manifest = {
+      apiVersion: "memmy/v1" as const,
+      id: "com.example.legal",
+      name: "Legal",
+      version: "1.0.0",
+      runtime: { adapter: "command" as const },
+      capabilities: [{ id: "run", name: "Run", description: "Run", inputSchema: {}, outputSchema: {}, execution: "job" as const }],
+      permissions: [],
+      scenarios: [
+        { id: "risk", name: "用工风险诊断", description: "企业资料、访谈录音，一键生成风险诊断报告", icon: "scale", prompt: "帮我生成一份用工风险诊断报告。" }
+      ]
+    };
+    const base = {
+      id: "com.example.legal",
+      version: "1.0.0",
+      approvedPermissions: [],
+      config: {},
+      lastError: null,
+      createdAt: "2026-08-31T00:00:00.000Z",
+      updatedAt: "2026-08-31T00:00:00.000Z"
+    };
+    const active = InstalledPluginSchema.parse({ ...base, manifest, state: "active" });
+    const disabled = InstalledPluginSchema.parse({ ...base, manifest, state: "disabled" });
+
+    expect(collectPluginScenarios([active])).toEqual([
+      { ...manifest.scenarios[0], pluginId: "com.example.legal" }
+    ]);
+    // A disabled plugin cannot serve the work its card would start, so
+    // offering the card would dead-end.
+    expect(collectPluginScenarios([disabled])).toEqual([]);
+  });
+
+  it("converts Agent-routed plugin commands into explicit Skill prompts", () => {
+    const plugin = InstalledPluginSchema.parse({
+      id: "com.example.review",
+      version: "1.0.0",
+      manifest: {
+        apiVersion: "memmy/v1",
+        id: "com.example.review",
+        name: "Review",
+        version: "1.0.0",
+        runtime: { adapter: "http" },
+        capabilities: [{ id: "run", name: "Run", description: "Run", inputSchema: {}, outputSchema: {}, execution: "job" }],
+        skills: [{ id: "literature-review", name: "Literature Review", description: "Coordinate review tools", entry: "skills/literature-review/SKILL.md" }],
+        commands: [{ command: "/literature-review", name: "Literature Review", description: "Create a review", capabilityId: "run", agentSkillId: "literature-review" }],
+        permissions: []
+      },
+      state: "active",
+      approvedPermissions: [],
+      config: {},
+      lastError: null,
+      createdAt: "2026-08-31T00:00:00.000Z",
+      updatedAt: "2026-08-31T00:00:00.000Z"
+    });
+    const targets = collectPluginCommandTargets([plugin]);
+    expect(buildAgentRoutedPluginPrompt("/literature-review compare memory agents", targets)).toBe(
+      "$literature-review compare memory agents"
+    );
+    expect(buildAgentRoutedPluginPrompt("/literature-review", targets)).toBe("$literature-review");
+    expect(buildAgentRoutedPluginPrompt("ordinary chat", targets)).toBeNull();
+  });
+
   it("allows Goal steering when source metadata is missing without opening TUI or IM turns", () => {
     expect(isSteerableCurrentTurn(null, true)).toBe(true);
     expect(isSteerableCurrentTurn(null, false)).toBe(false);
     expect(isSteerableCurrentTurn({ kind: "gui", channel: "websocket" }, false)).toBe(true);
     expect(isSteerableCurrentTurn({ kind: "tui", channel: "websocket" }, true)).toBe(false);
     expect(isSteerableCurrentTurn({ kind: "im", channel: "slack" }, true)).toBe(false);
+  });
+
+  it("adds a capability block without clearing the existing draft", () => {
+    expect(addCapabilityBlockToDraft("/review", "比较两篇论文")).toBe(
+      "/review  比较两篇论文"
+    );
+    expect(addCapabilityBlockToDraft("/review", "")).toBe("/review  ");
+    expect(replaceTrailingSlashQuery("比较两篇论文 /lit", "/review", true)).toBe(
+      "比较两篇论文 /review "
+    );
+  });
+
+  it("keeps suggestions as plain drafts until a plugin command is selected", () => {
+    expect(homeSuggestionDraft("写一篇完整综述")).toBe("写一篇完整综述");
+    expect(homeSuggestionDraft("总结本周工作")).toBe("总结本周工作");
+  });
+
+  it("inserts and replaces a capability at the active caret", () => {
+    expect(insertCapabilityAtSelection("前文后文", "/review", 2)).toEqual({
+      value: "前文  /review  后文",
+      caret: 13
+    });
+    expect(replaceSlashQueryAtSelection("前文 /lit 后文", "/review", 7, 7, true)).toEqual({
+      value: "前文 /review  后文",
+      caret: 11
+    });
+  });
+
+  it("renders a selected capability inline without replacing the textarea", () => {
+    const html = renderToString(
+      <ComposerHighlightedTextarea
+        value="/review "
+        highlightedCommands={["/review"]}
+        placeholder="分配一个任务或提问任何问题..."
+        onChange={() => undefined}
+      />
+    );
+
+    expect(html).toContain("composer-slash-chip");
+    expect(html).toContain(">/review </textarea>");
+    expect(html).toContain("分配一个任务或提问任何问题...");
+  });
+
+  it("keeps unselected slash text editable instead of turning it into a capability chip", () => {
+    const html = renderToString(
+      <ComposerHighlightedTextarea
+        value="/AI Memory"
+        highlightedCommands={["/review"]}
+        placeholder="分配一个任务或提问任何问题..."
+        onChange={() => undefined}
+      />
+    );
+
+    expect(html).not.toContain("composer-slash-chip");
+    expect(html).toContain("/AI Memory");
+  });
+
+  it("highlights and removes a selected capability at an inline caret position", () => {
+    expect(composerHighlightSegments(
+      "前文 /review 后文",
+      ["/review"]
+    )).toEqual([
+      { text: "前文 ", command: false },
+      { text: "/review", command: true },
+      { text: " 后文", command: false }
+    ]);
+    expect(removeHighlightedCommandAtCaret(
+      "前文 /review 后文",
+      ["/review"],
+      10,
+      "Backspace"
+    )).toEqual({ value: "前文 后文", caret: 3 });
   });
 
   it("renders the first-phase agent input controls", () => {
@@ -87,9 +529,14 @@ describe("HomePage", () => {
     );
 
     expect(html).toContain("分配一个任务或提问任何问题...");
-    expect(html).toContain("添加图片和文件");
+    expect(html).toContain("添加资料");
+    expect(html).not.toContain('aria-label="引用"');
+    expect(html).toContain("能力");
     expect(html).toContain("语音输入");
     expect(html).toContain("发送");
+    expect(html).toContain("帮我写一篇关于 AI Memory 研究的文献综述");
+    expect(html).toContain("帮我总结一下本周的工作");
+    expect(html).toContain("梳理我最近的一个任务，并列出可行的待办");
     expect(html).toContain("Agent 正在连接");
     expect(html).not.toContain('aria-haspopup="menu"');
     expect(html).toContain('class="home-project-picker__trigger"');
@@ -97,7 +544,7 @@ describe("HomePage", () => {
     expect(html).toContain(`accept="${AGENT_MEDIA_ACCEPT}"`);
     expect(html).toContain("hidden");
     expect(html).toContain('class="hidden"');
-    expect(html).toContain('data-icon="plus"');
+    expect(html).toContain("lucide-plus");
     expect(html).toContain('data-icon="mic"');
     expect(html).toContain('data-icon="send"');
     expect(html).not.toContain("添加照片和文件");
@@ -105,7 +552,7 @@ describe("HomePage", () => {
     expect(html).not.toContain('data-icon="image-plus"');
     expect(html).not.toContain('data-icon="pause"');
     expect(html).toContain("内容由 AI 生成，请仔细甄别");
-    expect(html).toContain("text-center text-[11px] text-text-ink/40 mt-4");
+    expect(html).toContain("text-center text-[11px] text-text-ink/40 mt-3");
     expect(html).not.toContain("未选择任何文件");
   });
 
@@ -143,11 +590,16 @@ describe("HomePage", () => {
     expect(chipStyles).toContain("font-weight: 500;");
     expect(chipStyles).toMatch(/\.composer-command-chip__icon\s*{[^}]*position:\s*absolute;/s);
     expect(chipStyles).toMatch(/\.composer-command-chip__leading\s*{[^}]*display:\s*inline-flex;/s);
-    expect(source.match(/<ComposerCommandChip/g)).toHaveLength(2);
-    expect(source.match(/value=\{composerInput\}/g)).toHaveLength(2);
+    expect(source.match(/<ComposerCommandChip/g)).toHaveLength(1);
+    expect(source.match(/\{renderComposerLeadingActions\(\)\}/g)).toHaveLength(2);
+    expect(source.match(/<ComposerHighlightedTextarea/g)).toHaveLength(1);
+    expect(source.match(/<textarea\b/g)).toHaveLength(1);
     expect(source).toContain("setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));");
     expect(source).toContain("selectedComposerCommandsByScope[chatScopeKey] ?? null");
     expect(source).toContain("setSelectedComposerCommandForScope(chatScopeKey, COMPOSER_GOAL_COMMAND);");
+    expect(source).toContain("const goalSlashCommand: SlashCommandPaletteItem");
+    expect(source).toContain("command: COMPOSER_GOAL_COMMAND");
+    expect(source).toContain('icon: "target"');
     expect(source).toContain('label={t("home.command.goalChip")}');
     expect(source).toContain('placeholder={selectedComposerCommand ? t("home.goal.input") : t("home.input")}');
     expect(styles).toContain(".agent-composer-shell--expanded textarea.agent-composer-input--conversation");
@@ -173,7 +625,8 @@ describe("HomePage", () => {
     expect(filterGoalModeSlashCommands(commands, false).map((item) => item.command)).toEqual([
       "/last-compaction"
     ]);
-    expect(source).toContain("const slashQuery = slashMenuDismissed ? null : slashQueryFromInput(composerInput);");
+    expect(source).toContain("const slashQuery = slashMenuDismissed");
+    expect(source).toContain(": slashQueryFromInput(composerInput.slice(0, Math.min(composerSelection.start, composerInput.length)));");
     expect(source).toContain("clearAuxiliarySlashQuery();");
     expect(source).toContain('setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, ""));');
   });
@@ -237,7 +690,7 @@ describe("HomePage", () => {
       source.indexOf("  useEffect(() => {\n    if (!clients?.memmyAgent)")
     );
     const updateComposerInputBlock = source.slice(
-      source.indexOf("function updateComposerInput(value: string)"),
+      source.indexOf("function updateComposerInput(value: string,"),
       source.indexOf("  /**\n   * 自动收缩或展开输入框高度。")
     );
 
@@ -259,17 +712,39 @@ describe("HomePage", () => {
     expect(updateComposerInputBlock).toContain("loadSlashCommands({ resetAttempts: true });");
   });
 
-  it("keeps slash menu rendering and command panels on their existing boundaries", () => {
+  it("anchors typed slash menus at the caret and button-triggered menus at the button", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
+    const styles = readFileSync(stylesSourcePath, "utf8");
 
     expect(source).toContain("const slashMenuOpen = filteredSlashCommands.length > 0;");
-    expect(source.match(/\{slashMenuOpen && \(/g)).toHaveLength(2);
+    expect(source).toContain("function ComposerCaretMenu(props:");
+    expect(source).toContain('mirror.style.whiteSpace = "pre-wrap";');
+    expect(source).toContain("const caretTop = caretMarker.offsetTop;");
+    expect(source).not.toContain("context?.measureText(currentLine)");
+    expect(source.match(/\{slashMenuOpen && !slashPickerOpen \? \(/g)).toHaveLength(2);
+    expect(source).toContain("{slashMenuOpen && slashPickerOpen ? (");
+    expect(source).toContain('className="composer-quick-actions__anchor"');
+    expect(source).toContain('className="composer-quick-actions__popover composer-quick-actions__popover--slash"');
+    expect(source).toContain("aria-expanded={slashPickerOpen}");
+    expect(source).toContain("onClick={insertComposerSlashTrigger}");
+    expect(source).toContain('ref={composerAttachMenuRef} className="agent-composer-attach-menu"');
+    expect(source).toContain('composerAttachMenuRef.current?.removeAttribute("open");');
+    expect(styles).toContain(".agent-composer-shell--expanded .composer-quick-actions__popover--slash");
+    expect(styles).toContain("bottom: calc(100% + 8px);");
+    expect(source).toContain('<ComposerCaretMenu textareaRef={inputRef} containerRef={composerShellRef} value={composerInput} placement="above">');
+    expect(source).toContain('bottom: Math.max(8, container.clientHeight - caretTopInContainer + 4)');
+    expect(styles).toContain("top: calc(100% + 6px);");
+    expect(source).not.toContain('slashPickerOpen || /^\\s*\\//.test(input)');
+    expect(source).not.toContain("referenceMenuOpen");
+    expect(source).not.toContain("referencePickerOpen");
     expect(source).toContain("const [lastCompactionPanel, setLastCompactionPanel] = useState<StatusPanelState>({ open: false });");
     expect(source).toContain("const lastCompactionSlashCommand: SlashCommandPaletteItem = {");
     expect(source).toContain('command: "/last-compaction"');
     expect(source).toContain("const slashCommandsWithLocal = [");
+    expect(source).toContain("goalSlashCommand,");
     expect(source).toContain("lastCompactionSlashCommand,");
-    expect(source).toContain('...localizedSlashCommands.filter((command) => command.command !== "/last-compaction")');
+    expect(source).toContain("command.command !== COMPOSER_GOAL_COMMAND");
+    expect(source).toContain('command.command !== "/last-compaction"');
     expect(source).toContain("buildVisibleSlashCommands(slashCommandsWithLocal, state.agent.isSending, stopSlashCommand)");
     expect(source).toContain("{statusPanel.open && !slashMenuOpen && (");
     expect(source).toContain("{lastCompactionPanel.open && !slashMenuOpen && (");
@@ -288,15 +763,38 @@ describe("HomePage", () => {
     expect(source).toContain("const activeImTitleDisplay = imChannelTitleDisplay(activeConversationTitle);");
     expect(source).toContain("formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle)");
     expect(source).toContain("topBar={hasActiveConversation || environmentScope ? (");
+    expect(source).toContain('className={`agent-conversation-topbar${sidePreviewOpen ? " agent-conversation-topbar--preview-open" : ""}`}');
     expect(source).toContain("topBarEnd={hasActiveConversation || environmentScope ? (");
     expect(source).toContain('title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}');
     expect(source).toContain("{hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}");
     expect(source).toContain('{hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}');
-    expect(source).toContain("topBarBorder={Boolean(hasActiveConversation || environmentScope)}");
+    expect(source).toContain("topBarBorder={Boolean(hasActiveConversation || environmentScope) && !sidePreviewOpen}");
     expect(source).not.toContain("agent-conversation-titlebar");
     expect(source).toContain("app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto");
     expect(source).toContain("onScroll={handleAgentConversationScroll}");
     expect(source).toContain('className="agent-conversation-composer"');
+    expect(source).toContain("{environmentScope && !recordingEntry.open ? (");
+    expect(source).toContain("const previewToggle = previewScope ? (");
+    expect(source).toContain("<PanelRight size={15}");
+    expect(source).toContain("<WorkspaceArtifactPanel");
+    expect(source).toContain("focusExternalFile={previewFocusExternalFile}");
+    expect(source).toContain("if (mediaUrl)");
+    // The recorder shares the panel, so the file preview stays mounted when it
+    // is closed but a recorder is on screen, and hides behind one that is open.
+    expect(source).toContain("hidden={(!previewPanelOpen && !recordingEntry.open) || pluginArtifactPreview !== null || recorderPaneOpen}");
+    expect(source).toContain("toolbarEnd={previewToggle}");
+    expect(source).toContain("{!sidePreviewOpen ? previewToggle : null}");
+    expect(source).toContain("agent-environment-toggle--with-preview");
+    const environmentButton = source.slice(
+      source.indexOf("data-agent-environment-toggle"),
+      source.indexOf("</button>", source.indexOf("data-agent-environment-toggle"))
+    );
+    const previewButton = source.slice(
+      source.indexOf("agent-preview-toggle"),
+      source.indexOf("</button>", source.indexOf("agent-preview-toggle"))
+    );
+    expect(environmentButton).not.toContain("setPreviewPanelOpen(false)");
+    expect(previewButton).not.toContain("setEnvironmentPanelOpen(false)");
   });
 
   it("anchors the history DAG popover to the composer width", () => {
@@ -489,7 +987,7 @@ describe("HomePage", () => {
 
   it("passes the current UI language into agent websocket messages", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
-    const sendBlock = source.slice(source.indexOf("async function sendMessage()"), source.indexOf("  /**\n   * 停止当前 Agent 回合"));
+    const sendBlock = source.slice(source.indexOf("async function sendMessage()"), source.indexOf("function stopCurrentTurn"));
 
     expect(source).toContain("const { language, t } = useTranslation();");
     expect(sendBlock).toContain("language,");
@@ -497,12 +995,20 @@ describe("HomePage", () => {
 
   it("intercepts exact local slash commands before normal message submission", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
-    const sendBlock = source.slice(source.indexOf("async function sendMessage()"), source.indexOf("  /**\n   * 停止当前 Agent 回合"));
-    const localSlashBlock = source.slice(source.indexOf("function runExactLocalSlashCommand"), source.indexOf("  /**\n   * 停止当前 Agent 回合"));
+    const sendBlock = source.slice(source.indexOf("async function sendMessage()"), source.indexOf("function stopCurrentTurn"));
+    const localSlashBlock = source.slice(source.indexOf("function runExactLocalSlashCommand"), source.indexOf("function stopCurrentTurn"));
 
     expect(sendBlock).toContain("if (runExactLocalSlashCommand(input))");
     expect(sendBlock.indexOf("runExactLocalSlashCommand(input)")).toBeLessThan(sendBlock.indexOf("submitAgentComposerMessage({"));
-    expect(localSlashBlock).toContain("if (pendingAttachments.length > 0) return false;");
+    expect(localSlashBlock).toContain("parsePluginCommandInvocation(command, pluginCommandTargets)");
+    expect(localSlashBlock).toContain("pluginInvocation?.contribution.agentSkillId");
+    expect(localSlashBlock).toContain("clients.plugins.invoke(plugin.id, contribution.capabilityId");
+    expect(localSlashBlock).toContain("openSurface({ pluginId: plugin.id");
+    expect(localSlashBlock).toContain('appActions.navigate("/plugin")');
+    expect(localSlashBlock).toContain("references: contextChips");
+    expect(localSlashBlock).toContain("composerContextReferencesUpdated(chatScopeKey, [])");
+    expect(localSlashBlock).toContain('draftTarget.kind === "project"');
+    expect(localSlashBlock).not.toContain("sessionStorage");
     expect(localSlashBlock).toContain('normalized === "/last-compaction"');
     expect(localSlashBlock).toContain("requestLastCompactionPanel();");
     expect(localSlashBlock).toContain('normalized === "/history-dag"');
@@ -605,7 +1111,7 @@ describe("HomePage", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const styles = readFileSync(stylesSourcePath, "utf8");
 
-    expect(source).toContain('agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}');
+    expect(source).toContain('agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}${sidePreviewOpen ? " agent-workspace-layout--preview-open" : ""}');
     expect(source).toContain('className="agent-conversation-content max-w-3xl mx-auto space-y-3"');
     expect(source).toContain('className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto"');
     const composerRule = styles.match(/\.agent-conversation-composer\s*\{[^}]*\}/)?.[0] ?? "";
@@ -615,6 +1121,17 @@ describe("HomePage", () => {
     expect(styles).toContain(".agent-workspace-layout--environment-open .agent-conversation-content");
     expect(styles).toMatch(/--agent-conversation-shift:\s*\d+px;/);
     expect(styles).toContain("transform: translateX(calc(0px - var(--agent-conversation-shift)));");
+    expect(styles).toContain("@container agent-workspace (max-width: 479px)");
+    expect(styles).toContain(".agent-workspace-layout--preview-open > .workspace-artifact-preview-pane");
+    expect(styles).toContain("right: calc(var(--agent-preview-panel-width, 520px) + 20px);");
+    expect(styles).toContain(".agent-workspace-layout--preview-open > .agent-conversation-panel");
+    expect(styles).toContain(".app-frame-content-topbar:has(.agent-conversation-topbar--preview-open)");
+    expect(styles).toMatch(/body:has\(\.sidebar-shell\) \.window-drag-region\s*{[^}]*display:\s*none;/s);
+    expect(styles).toMatch(/\.agent-conversation-title\s*{[^}]*-webkit-app-region:\s*drag;/s);
+    expect(styles).toMatch(/\.workspace-artifact-file-tabs\s*{[^}]*-webkit-app-region:\s*drag;/s);
+    expect(styles).toMatch(/\.workspace-artifact-file-tab\s*{[^}]*-webkit-app-region:\s*no-drag;/s);
+    expect(styles).toMatch(/\.workspace-artifact-file-tab__close\s*{[^}]*-webkit-app-region:\s*no-drag;/s);
+    expect(styles).toContain("right: calc(76px - var(--codex-content-padding-x));");
     expect(styles).toMatch(/\.agent-environment-panel\s*{[^}]*position:\s*absolute;/s);
   });
 
@@ -1030,14 +1547,29 @@ describe("HomePage", () => {
     expect(focusInput).toHaveBeenCalledTimes(1);
   });
 
-  it("opens the system media picker directly from the plus button without rendering a floating media menu", () => {
+  it("offers file and folder choices from the composer plus button", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
+    const styles = readFileSync(stylesSourcePath, "utf8");
+    const baseSelector = ".agent-composer-attach-menu__popover {";
+    const baseStart = styles.indexOf(baseSelector);
+    const baseBlock = styles.slice(baseStart, styles.indexOf("}", baseStart));
+    const conversationSelector = ".agent-composer-shell--expanded .agent-composer-attach-menu__popover {";
+    const conversationStart = styles.indexOf(conversationSelector);
+    const conversationBlock = styles.slice(conversationStart, styles.indexOf("}", conversationStart));
 
-    expect(source).toContain("onClick={openMediaFilePicker}");
-    expect(source).not.toContain("function ComposerMediaMenu");
-    expect(source).not.toContain("setMediaMenuOpen");
+    expect(source).toContain("openMediaFilePicker();");
+    expect(source).toContain("openFolderPicker();");
+    expect(source).toContain("agent-composer-attach-menu__popover");
+    expect(source).toContain('ref={composerCapabilityMenuRef} className="composer-quick-actions__anchor"');
+    expect(source).toContain("!composerCapabilityMenuRef.current?.contains(event.target as Node)");
     expect(source).not.toContain("aria-haspopup=\"menu\"");
-    expect(source).not.toContain("role=\"menuitem\"");
+    expect(source).toContain("role=\"menuitem\"");
+    expect(baseBlock).toContain("top: calc(100% + 8px);");
+    expect(baseBlock).toContain("right: auto;");
+    expect(baseBlock).toContain("bottom: auto;");
+    expect(baseBlock).toContain("left: 0;");
+    expect(conversationBlock).toContain("top: auto;");
+    expect(conversationBlock).toContain("bottom: calc(100% + 8px);");
   });
 
   it("renders composer media previews as compact thumbnail and file chips", () => {
@@ -1082,32 +1614,36 @@ describe("HomePage", () => {
     expect(html).toContain(">table<");
     expect(html).toContain(">data<");
     expect(html).toContain(">payload<");
-    expect(html).toContain(">PDF<");
-    expect(html).toContain(">DOC<");
-    expect(html).toContain(">XLS<");
-    expect(html).toContain(">PPT<");
-    expect(html).toContain(">FILE<");
+    expect(html).toContain("file-type-icon__paper");
+    expect(html).toContain("file-type-icon__glyph");
+    expect(html).toContain("file-type-icon__format-label");
+    expect(html).toContain(">PDF</text>");
+    expect(html).toContain(">DOC</text>");
+    expect(html).toContain(">XLS</text>");
+    expect(html).toContain(">PPT</text>");
     expect(compactHtml).toContain("XLSX · 2.0 KB");
     expect(compactHtml).toContain("PPTX · 1.5 KB");
     expect(compactHtml).toContain("TXT · 512 B");
     expect(compactHtml).toContain("CSV · 768 B");
     expect(compactHtml).toContain("JSON · 1.0 KB");
     expect(compactHtml).toContain("XML · 640 B");
-    expect(html).toContain('data-testid="agent-file-icon-pdf"');
-    expect(html).toContain('data-testid="agent-file-icon-docx"');
-    expect(html).toContain('data-testid="agent-file-icon-xlsx"');
-    expect(html).toContain('data-testid="agent-file-icon-pptx"');
-    expect(html).toContain('data-testid="agent-file-icon-file"');
-    expect(html).toContain("agent-attachment-card__file-tile--pdf");
-    expect(html).toContain("agent-attachment-card__file-tile--docx");
-    expect(html).toContain("agent-attachment-card__file-tile--xlsx");
-    expect(html).toContain("agent-attachment-card__file-tile--pptx");
-    expect(html).toContain("agent-attachment-card__file-tile--file");
-    expect(html).toContain('aria-label="PDF file"');
+    expect(html).toContain('data-testid="file-type-icon-pdf"');
+    expect(html).toContain('data-testid="file-type-icon-word"');
+    expect(html).toContain('data-testid="file-type-icon-spreadsheet"');
+    expect(html).toContain('data-testid="file-type-icon-presentation"');
+    expect(html).toContain('data-testid="file-type-icon-text"');
+    expect(html).toContain('data-testid="file-type-icon-code"');
+    expect(html).toContain("file-type-icon--pdf");
+    expect(html).toContain("file-type-icon--word");
+    expect(html).toContain("file-type-icon--spreadsheet");
+    expect(html).toContain("file-type-icon--presentation");
+    expect(html).toContain("file-type-icon--text");
+    expect(html).toContain("file-type-icon--code");
+    expect(html).toContain('aria-label="PDF document"');
     expect(html).toContain('aria-label="Word document"');
-    expect(html).toContain('aria-label="Spreadsheet file"');
-    expect(html).toContain('aria-label="Presentation file"');
-    expect(html).toContain('aria-label="File attachment"');
+    expect(html).toContain('aria-label="Spreadsheet"');
+    expect(html).toContain('aria-label="Presentation"');
+    expect(html).toContain('aria-label="Text document"');
     expect(html).not.toContain("absolute -right-1 -bottom-1");
     expect(html).not.toContain('data-testid="composer-file-kind-');
     expect(compactHtml).toContain("PNG · 2.0 KB");
@@ -1150,6 +1686,8 @@ describe("HomePage", () => {
   });
 
   it("translates media send error keys for visible agent errors", () => {
+    const denied = pluginInvocationError(new ApiRequestError("Plugin grant missing", 403, "plugin_entitlement_required"));
+    expect(agentErrorText(denied)).toBe("当前账号未获得此插件的使用授权，请刷新账号状态后重试。");
     expect(agentErrorText("home.media.error.sendUnsupported")).toBe("当前不支持此文件格式。请上传图片、PDF、Office 文档或文本文件。");
     expect(agentErrorText("home.modelSelector.unavailable")).toBe("当前模型或连接已失效，无法继续调用，需要切换模型。");
     expect(agentErrorText("message_request_rejected:model_selection_unavailable")).toBe("当前模型或连接已失效，无法继续调用，需要切换模型。");
@@ -1161,6 +1699,15 @@ describe("HomePage", () => {
     );
     expect(agentErrorText("plain error")).toBe("操作未完成，请重试");
     expect(agentErrorText(null)).toBeNull();
+  });
+
+  it("does not clear the composer when the chat send is rejected", async () => {
+    const cleared = vi.fn();
+    await expect(submitAgentComposerMessage({ chatId: "chat-1", content: "Revise this card", pendingAttachments: [],
+      connection: { getReadyGeneration: () => 1, newChat: vi.fn(), submitMessage: vi.fn(async () => { throw new Error("Disconnected"); }) },
+      uploadAgentMedia: vi.fn(), dispatch: vi.fn(), track: vi.fn(), clearComposer: cleared
+    })).resolves.toBe(false);
+    expect(cleared).not.toHaveBeenCalled();
   });
 
   it("keeps the model unavailable reason when a tombstone blocks new-chat creation", async () => {
@@ -1423,21 +1970,24 @@ describe("HomePage", () => {
     expect(clearComposer).toHaveBeenCalledOnce();
   });
 
-  it("anchors composer popovers above the queue and keeps Goal next to the composer", () => {
+  it("anchors the capability menu to its button while status popovers stay above the queue", () => {
     const source = readFileSync(homePageSourcePath, "utf8").replace(/\r\n/g, "\n");
     const flowStart = source.indexOf('<div className="agent-composer-flow">');
-    const slashStart = source.indexOf("{slashMenuOpen && (", flowStart);
-    const stackStart = source.indexOf('<div className="agent-composer-stack">', slashStart);
+    const stackStart = source.indexOf('<div className="agent-composer-stack">', flowStart);
     const queueStart = source.indexOf("<AgentQueuedMessageList", stackStart);
     const goalStart = source.indexOf("<AgentGoalBar", stackStart);
     const shellStart = source.indexOf('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"', stackStart);
+    const leadingActionsStart = source.indexOf("function renderComposerLeadingActions");
+    const capabilityAnchorStart = source.indexOf('className="composer-quick-actions__anchor"', leadingActionsStart);
+    const capabilityMenuStart = source.indexOf('className="composer-quick-actions__popover composer-quick-actions__popover--slash"', capabilityAnchorStart);
 
     expect(flowStart).toBeGreaterThan(0);
-    expect(slashStart).toBeGreaterThan(flowStart);
-    expect(stackStart).toBeGreaterThan(slashStart);
+    expect(stackStart).toBeGreaterThan(flowStart);
     expect(queueStart).toBeGreaterThan(stackStart);
     expect(goalStart).toBeGreaterThan(queueStart);
     expect(shellStart).toBeGreaterThan(goalStart);
+    expect(capabilityAnchorStart).toBeGreaterThan(leadingActionsStart);
+    expect(capabilityMenuStart).toBeGreaterThan(capabilityAnchorStart);
     expect(source).toContain('ref={conversationPanelRef} className="agent-conversation-panel flex flex-col h-full"');
     expect(source).toContain('ref={composerOverlayRef} className="agent-conversation-composer"');
     expect(source).toContain("updateAgentComposerOverlayHeight(panel, composer, measuredHeight)");
@@ -1978,3 +2528,17 @@ class MemoryStorage implements SlashCommandStorageLike {
     this.values.delete(key);
   }
 }
+
+
+it("hides legal composer shortcuts until the current conversation actually invokes the legal plugin", () => {
+  const legal=InstalledPluginSchema.parse({ id:"legal-labor", version:"1.0.0", state:"active", approvedPermissions:[], config:{}, lastError:null,
+    createdAt:"2026-10-13T00:00:00Z", updatedAt:"2026-10-13T00:00:00Z", manifest:{ apiVersion:"memmy/v1", id:"legal-labor", name:"Legal", version:"1.0.0",
+      runtime:{adapter:"http"}, permissions:[], capabilities:[{id:"session-start",name:"Guide",description:"Guide",inputSchema:{},outputSchema:{},execution:"job"}],
+      commands:[{command:"/legal-guide",name:"诊断指引",description:"Guide",capabilityId:"session-start",pinned:true},
+        {command:"/legal-record",name:"访谈录音",description:"Record",capabilityId:"session-start",pinned:true,topbar:true}] } });
+  const targets=collectPluginCommandTargets([legal]);
+  expect(selectConversationPinnedCommands(targets, [])).toEqual([]);
+  const invocation: PluginUiCall={pluginId:"legal-labor", capabilityId:"session-start",callId:"starting",conversationId:"law-chat",origin:"agent",events:[]};
+  expect(selectConversationPinnedCommands(targets,[invocation])).toHaveLength(2);
+  expect(selectConversationPinnedCommands(targets,[{...invocation,pluginId:"another-plugin"}])).toEqual([]);
+});

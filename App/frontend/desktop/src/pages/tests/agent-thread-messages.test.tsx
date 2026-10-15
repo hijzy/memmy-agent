@@ -5,6 +5,7 @@ import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { WINDOW_CONTROLS_OVERLAY_SAFE_TOP_STYLE } from "../../theme/window-controls-overlay.js";
 import { AttachmentActionError, emailAddressFromMailtoHref, estimateDeferredMarkdownHeight, isLikelyExpensiveAgentMarkdown, isMailtoHref, localArtifactPathFromHref, runAttachmentAction } from "../agent-message-content.js";
 import { AgentThreadMessages, buildAgentDisplayUnits, CHAT_IMAGE_LIGHTBOX_CLOSE_BUTTON_CLASS, CHAT_IMAGE_LIGHTBOX_NAV_BUTTON_CLASS, copyImageToClipboard, resolveAgentMessageDisplayContent, saveImageToFile } from "../agent-thread-messages.js";
+import { type AgentQuestionCardPayload } from "../agent-question-card.js";
 
 const agentThreadMessagesSourceUrl = new URL("../agent-thread-messages.tsx", import.meta.url);
 const agentMessageContentSourceUrl = new URL("../agent-message-content.tsx", import.meta.url);
@@ -12,6 +13,48 @@ const stylesSourceUrl = new URL("../../styles.css", import.meta.url);
 const WINDOWS_COMMAND_ERROR = "'node' 不是内部或外部命令，也不是可运行的程序\r\n或批处理文件。";
 
 describe("AgentThreadMessages", () => {
+  it("updates a question card in place without rendering its response as a user bubble", () => {
+    const card: AgentQuestionCardPayload = {
+      version: 1,
+      requestId: "question-1",
+      questions: [{
+        id: "uploads",
+        prompt: "还有其他文件需要上传吗？",
+        options: [
+          { id: "more", label: "继续上传" },
+          { id: "done", label: "已全部上传" }
+        ],
+        allowMultiple: false,
+        allowOther: true
+      }]
+    };
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-question"
+          messages={[
+            {
+              id: "question",
+              role: "assistant",
+              content: "请选择",
+              agentUi: { questionCard: card },
+              questionResponse: {
+                requestId: card.requestId,
+                answers: [{ questionId: "uploads", selectedOptionIds: ["done"] }]
+              }
+            }
+          ]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("还有其他文件需要上传吗？");
+    expect(html).toContain("已全部上传");
+    expect(html).toContain("已回答");
+    expect(html).not.toContain("agent-chat-bubble--user");
+    expect(html).not.toContain("memmy-question-response");
+  });
+
   it("shows a per-answer control for inspecting injected memories", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
@@ -2122,11 +2165,11 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain('data-testid="agent-attachment-card-file"');
     expect(html).toContain("agent-attachment-card");
     expect(html).toContain("agent-attachment-card__preview");
-    expect(html).toContain("agent-attachment-card__file-tile--pdf");
+    expect(html).toContain("file-type-icon--pdf");
     expect(html).toContain('style="max-width:min(100%, 32rem)"');
     expect(html).toContain('style="width:100%;max-height:26rem"');
     expect(html).toContain('data-testid="user-file-attachment"');
-    expect(html).toContain('data-testid="agent-file-icon-pdf"');
+    expect(html).toContain('data-testid="file-type-icon-pdf"');
     expect(html).toContain(">shot<");
     expect(html).toContain(">report<");
     expect(html).toContain('title="report.pdf"');
@@ -2472,13 +2515,33 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain('title="/Users/yuan/deck.pptx"');
     expect(html).toContain(">deck<");
     expect(html).toContain(">PPTX<");
-    expect(html).toContain('data-testid="agent-file-icon-pptx"');
+    expect(html).toContain('data-testid="file-type-icon-presentation"');
     expect(html).toContain('data-testid="agent-attachment-card-file"');
     expect(html).toContain("agent-attachment-card");
-    expect(html).toContain("agent-attachment-card__file-tile--pptx");
+    expect(html).toContain("file-type-icon--presentation");
     expect(html).not.toContain("rounded-tag");
     expect(html).not.toContain('href="/Users/yuan/deck.pptx"');
     expect(html).not.toContain('img src="/Users/yuan/deck.pptx"');
+  });
+
+  it("prefers in-app workspace preview before opening with the system default", async () => {
+    const previewArtifact = vi.fn(async () => true);
+    const openArtifact = vi.fn(async () => undefined);
+    const revealArtifact = vi.fn(async () => undefined);
+    const resolveArtifact = vi.fn(async () => ({
+      ...fileArtifact("/Users/yuan/project/outputs/review.pdf"),
+      relative_path: "outputs/review.pdf"
+    }));
+
+    await expect(runAttachmentAction({
+      path: "/Users/yuan/project/outputs/review.pdf",
+      label: "review.pdf",
+      artifactClient: { resolveArtifact, openArtifact, revealArtifact, previewArtifact }
+    })).resolves.toBe("opened");
+
+    expect(previewArtifact).toHaveBeenCalledWith("/Users/yuan/project/outputs/review.pdf");
+    expect(openArtifact).not.toHaveBeenCalled();
+    expect(revealArtifact).not.toHaveBeenCalled();
   });
 
   it("runs file attachment actions as open, reveal, download, then final failure", async () => {
