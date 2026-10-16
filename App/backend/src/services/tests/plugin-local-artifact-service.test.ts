@@ -1,6 +1,6 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { createPluginLocalArtifactService } from "../plugin-local-artifact-service.js";
@@ -93,6 +93,85 @@ describe("PluginLocalArtifactService", () => {
     expect(hosted.path).toBe(realpathSync(published));
     expect(readFileSync(published, "utf8")).toBe("# Published review");
     expect(readFileSync(output, "utf8")).toBe("# Published review");
+  });
+
+  it("publishes another plugin's deliverables, keyed by conversation when it has no task", async () => {
+    root = mkdtempSync(join(tmpdir(), "memmy-plugin-publish-any-"));
+    const pluginDataRoot = join(root, "plugin-data");
+    const workspace = join(root, "workspace");
+    const output = join(pluginDataRoot, "legal-labor", "sessions", "s1", "artifacts", "报告.docx");
+    mkdirSync(dirname(output), { recursive: true });
+    mkdirSync(workspace);
+    writeFileSync(output, "report");
+    const service = createPluginLocalArtifactService({
+      pluginDataRoot,
+      resolveWorkspace: async (conversationId) => conversationId === "websocket:chat-1" ? workspace : null
+    });
+
+    // No taskId: the legal plugin keys its work on sessionId, so the
+    // conversation scopes the output directory instead.
+    const hosted = await service.host({
+      id: "legal-labor",
+      approvedPermissions: [{ type: "host-service", services: ["plugin-data", "artifact-host"] }],
+      config: {}
+    }, {
+      id: "report", name: "企业-用工风险与合规诊断报告.docx", mediaType: "application/vnd.ms-word", uri: pathToFileURL(output).href, role: "deliverable"
+    }, { conversationId: "websocket:chat-1", callId: "call-1" });
+
+    const published = join(workspace, "outputs", "legal-labor", "websocket-chat-1", "企业-用工风险与合规诊断报告.docx");
+    expect(hosted.path).toBe(realpathSync(published));
+    expect(readFileSync(published, "utf8")).toBe("report");
+  });
+
+  it("keeps setup templates out of the outputs directory", async () => {
+    root = mkdtempSync(join(tmpdir(), "memmy-plugin-publish-setup-"));
+    const pluginDataRoot = join(root, "plugin-data");
+    const workspace = join(root, "workspace");
+    const output = join(pluginDataRoot, "legal-labor", "sessions", "s1", "artifacts", "清单.xlsx");
+    mkdirSync(dirname(output), { recursive: true });
+    mkdirSync(workspace);
+    writeFileSync(output, "template");
+    const service = createPluginLocalArtifactService({
+      pluginDataRoot,
+      resolveWorkspace: async () => workspace
+    });
+
+    // A template is something the user fills in, not something the engagement
+    // produced, so it is served but not written into outputs/.
+    const hosted = await service.host({
+      id: "legal-labor",
+      approvedPermissions: [{ type: "host-service", services: ["plugin-data", "artifact-host"] }],
+      config: {}
+    }, {
+      id: "checklist", name: "企业诊断前_资料准备清单.xlsx", mediaType: "application/vnd.ms-excel", uri: pathToFileURL(output).href, role: "setup"
+    }, { conversationId: "websocket:chat-1", callId: "call-1" });
+
+    expect(hosted.path).toBeUndefined();
+    expect(existsSync(join(workspace, "outputs"))).toBe(false);
+  });
+
+  it("serves an artifact without publishing when the conversation has no workspace", async () => {
+    root = mkdtempSync(join(tmpdir(), "memmy-plugin-publish-noworkspace-"));
+    const pluginDataRoot = join(root, "plugin-data");
+    const output = join(pluginDataRoot, "legal-labor", "sessions", "s1", "artifacts", "报告.docx");
+    mkdirSync(dirname(output), { recursive: true });
+    writeFileSync(output, "report");
+    const service = createPluginLocalArtifactService({
+      pluginDataRoot,
+      // Non-WebUI invocations have no conversation workspace.
+      resolveWorkspace: async () => null
+    });
+
+    const hosted = await service.host({
+      id: "legal-labor",
+      approvedPermissions: [{ type: "host-service", services: ["plugin-data", "artifact-host"] }],
+      config: {}
+    }, {
+      id: "report", name: "报告.docx", mediaType: "application/vnd.ms-word", uri: pathToFileURL(output).href, role: "deliverable"
+    }, { conversationId: "websocket:chat-1", callId: "call-1" });
+
+    expect(hosted.path).toBeUndefined();
+    expect(hosted.uri).toMatch(/\/preview$/);
   });
 
   it("does not treat a plugin-configured taskRoot as a Host-approved path", async () => {

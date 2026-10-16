@@ -70,7 +70,7 @@ export function createPluginLocalArtifactService(options: CreatePluginLocalArtif
       artifacts.set(token, { pluginId: plugin.id, path, name: artifact.name, mediaType: artifact.mediaType });
       const base = `/api/v1/plugins/${encodeURIComponent(plugin.id)}/artifacts/${encodeURIComponent(token)}`;
       const publishedPath = context
-        ? await publishArtifactToWorkspace(path, plugin.id, artifact.name, context, options.resolveWorkspace)
+        ? await publishArtifactToWorkspace(path, plugin.id, artifact.name, artifact.role, context, options.resolveWorkspace)
         : null;
       return {
         ...artifact,
@@ -99,15 +99,24 @@ async function publishArtifactToWorkspace(
   sourcePath: string,
   pluginId: string,
   artifactName: string,
+  artifactRole: PluginArtifactRef["role"],
   context: PluginArtifactHostContext,
   resolveWorkspace: CreatePluginLocalArtifactServiceOptions["resolveWorkspace"]
 ): Promise<string | null> {
-  if (!resolveWorkspace || pluginId !== "literature-review" || !context.taskId) return null;
+  if (!resolveWorkspace) return null;
+  // A setup artifact is an input the user downloads and fills in — a blank
+  // template, a checklist. `outputs/` holds what an engagement produced, so
+  // publishing templates here would bury the report among blank forms.
+  if (artifactRole === "setup") return null;
   const workspacePath = await resolveWorkspace(context.conversationId);
   if (!workspacePath) return null;
   const workspace = await realpath(workspacePath);
   const relativeName = safeArtifactRelativePath(artifactName);
-  const taskDirectory = safePathSegment(context.taskId, "task");
+  // One directory per task, or per conversation when the plugin has no task
+  // concept. Keying on the conversation keeps the files of one engagement
+  // together and lets a re-run overwrite its own earlier output instead of
+  // leaving a duplicate beside it.
+  const taskDirectory = safePathSegment(context.taskId ?? context.conversationId, "task");
   const parent = await ensureSafeDirectory(workspace, [
     "outputs",
     safePathSegment(pluginId, "plugin"),

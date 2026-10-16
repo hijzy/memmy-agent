@@ -59,7 +59,7 @@ import {
 } from "./interview-recording-panel.js";
 import { materializePluginUploadFile } from "../lib/plugin-upload-file.js";
 import { startBrowserDownload } from "./agent-message-content.js";
-import { RecordingWaveform } from "./recording-waveform.js";
+import { RecordingWaveform, WAVE_BARS } from "./recording-waveform.js";
 
 /** Moving only the bar leaves its microphone owner mounted in the side pane. */
 export const RecordingBarPortalContext = createContext<{ target: HTMLElement | null; hidden: boolean } | null>(null);
@@ -249,10 +249,17 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
   const currentRetries = [...diagnosisRetries.values()].filter((retry) => props.calls.some((call) => call.callId === retry.callId));
   // A run of the Agent pausing is not the diagnosis being finished: Memmy may
   // be mid-revision, with the report about to be rewritten. The delivery waits
-  // for the plugin too — with no legal call still running, the report on screen
-  // is the final one rather than a draft the user should not be reading yet.
-  const legalCallActive = props.calls.some((call) => call.pluginId === "legal-labor"
-    && !call.events.some((event) => event.type === "result" || event.type === "error"));
+  // for the plugin too — while a legal call is running, the report on screen is
+  // a draft the user should not be reading yet.
+  //
+  // Only the newest legal call decides. An earlier call that never received a
+  // terminal event — a plugin process killed mid-run, a stream that dropped, an
+  // app restarted while a card was open — would otherwise sit there looking
+  // active forever and suppress the delivery for the rest of the session, which
+  // is exactly what a stranded `session-start` did to a finished diagnosis.
+  const latestLegalCall = [...props.calls].reverse().find((call) => call.pluginId === "legal-labor");
+  const legalCallActive = Boolean(latestLegalCall
+    && !latestLegalCall.events.some((event) => event.type === "result" || event.type === "error"));
   const deliveryReport = region === "flow" && props.legalDelivery?.ready && !legalCallActive
     ? selectLegalDeliveryReport(props.calls) : null;
   const deliveryFiles = deliveryReport ? [deliveryReport, ...props.legalDelivery!.recordings] : [];
@@ -813,7 +820,7 @@ function AudioRecordCard(props: {
   const recorder = useAsrRecorder(props.asrClient, {
     live: {
       onLine: (line) => setLines((current) => mergeLiveLines(current, line)),
-      onLevel: (level) => setLevels((current) => pushWaveformLevel(current, level, WAVEFORM_BARS)),
+      onLevel: (level) => setLevels((current) => pushWaveformLevel(current, level, WAVE_BARS)),
       onError: (liveErr) => setLiveError((current) => current ?? (isLiveAsrTimeout(liveErr) ? t("plugin.ui.audio.liveTimeout") : liveErr.message))
     }
   });
@@ -1107,9 +1114,6 @@ function AudioRecordCard(props: {
 
 /** Point at which the recording card starts counting down to the hard stop. */
 const REMAINING_WARNING_MS = 5 * 60 * 1_000;
-
-/** How many bars the recording waveform shows. */
-const WAVEFORM_BARS = 40;
 
 function formatUploadFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;

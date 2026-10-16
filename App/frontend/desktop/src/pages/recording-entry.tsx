@@ -28,7 +28,7 @@ import { persistRecording } from "../lib/recording-deliverables.js";
 import { saveRecordingArchiveEntry, useRecordingArchive } from "../lib/recording-archive.js";
 import { handOverRecording } from "../lib/recording-handover.js";
 import { usePluginTranscriptions } from "../app/plugin-ui-context.js";
-import { RecordingWaveform } from "./recording-waveform.js";
+import { RecordingWaveform, WAVE_BARS } from "./recording-waveform.js";
 
 /**
  * Where a finished recording is sent.
@@ -221,7 +221,7 @@ export function useRecordingEntry(
   viewRef.current = view;
   const recorder = useAsrRecorder(asrClient, {
     live: {
-      onLevel: (level) => setLevels((current) => pushWaveformLevel(current, level, 40)),
+      onLevel: (level) => setLevels((current) => pushWaveformLevel(current, level, WAVE_BARS)),
       onLine: (line) => setLines((current) => mergeLiveLines(current, line)),
       // Same reasoning as the plugin's recording card: a failed live segment
       // or a streaming connection that never opens must not look like nothing

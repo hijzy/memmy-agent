@@ -522,6 +522,60 @@ it("holds the delivery back while the plugin is still working on the report", as
   }
 });
 
+it("delivers the report even though an earlier call was stranded without a terminal event", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  // A plugin process killed mid-run, or a stream that dropped: this call never
+  // received a result or an error, so it looks active for the rest of the
+  // session. It must not hold the delivery back forever.
+  const stranded: PluginUiCall = { pluginId: plugin.id, capabilityId: "session-start", callId: "stranded", conversationId: "chat-1", origin: "agent", events: [
+    { type: "artifact", artifact: { id: "checklist", name: "资料准备清单.xlsx", role: "setup", uri: "plugin-artifact://legal-labor/checklist", mediaType: "application/vnd.ms-excel" } }
+  ] };
+  const report: PluginUiCall = { pluginId: plugin.id, capabilityId: "report-render", callId: "report-final", conversationId: "chat-1", origin: "agent", events: [
+    { type: "artifact", artifact: { id: "final", name: "企业-诊断报告.docx", role: "deliverable", uri: "plugin-artifact://legal-labor/final", mediaType: docx, path: "/ws/report.docx" } },
+    { type: "result", output: {} }
+  ] };
+  try {
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="zh-CN">
+      <PluginCapabilityHost region="flow" calls={[stranded, report]} plugins={[plugin]} client={{ getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn() }}
+        legalDelivery={{ ready: true, recordings: [] }} />
+    </I18nProvider></PluginUiProvider>));
+    const card = container.querySelector(".legal-delivery-card");
+    expect(card).not.toBeNull();
+    expect(card!.textContent).toContain("企业-诊断报告");
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+  }
+});
+
+it("still holds the delivery back while the newest legal call is running", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  const report: PluginUiCall = { pluginId: plugin.id, capabilityId: "report-render", callId: "report-final", conversationId: "chat-1", origin: "agent", events: [
+    { type: "artifact", artifact: { id: "final", name: "企业-诊断报告.docx", role: "deliverable", uri: "plugin-artifact://legal-labor/final", mediaType: docx } },
+    { type: "result", output: {} }
+  ] };
+  // A re-run started after the report: the newest call is still going.
+  const revising: PluginUiCall = { pluginId: plugin.id, capabilityId: "report-render", callId: "report-again", conversationId: "chat-1", origin: "agent", events: [
+    { type: "progress", message: "正在重写第三章" }
+  ] };
+  try {
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="zh-CN">
+      <PluginCapabilityHost region="flow" calls={[report, revising]} plugins={[plugin]} client={{ getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn() }}
+        legalDelivery={{ ready: true, recordings: [] }} />
+    </I18nProvider></PluginUiProvider>));
+    expect(container.querySelector(".legal-delivery-card")).toBeNull();
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+  }
+});
+
 it("delivers the finished report with the recordings only once the Agent is done", async () => {
   const container = document.createElement("div");
   document.body.append(container);

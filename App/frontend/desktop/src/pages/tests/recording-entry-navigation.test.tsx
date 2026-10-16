@@ -1,4 +1,6 @@
 // @vitest-environment happy-dom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +8,8 @@ import { InstalledPluginSchema } from "@memmy/local-api-contracts";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { collectPluginCommandTargets, PinnedPluginCommandBar } from "../home-page.js";
 import { RecordingEntryCard, RecordingEntryPage, useRecordingEntry, type RecordingEntryController } from "../recording-entry.js";
+
+const here = import.meta.dirname;
 
 const recorder = vi.hoisted(() => ({
   status: "idle" as "idle" | "recording", isRecording: false, isStarting: false, isTranscribing: false, error: null,
@@ -105,6 +109,20 @@ describe("independent interview recording entries", () => {
     expect(recorder.start).not.toHaveBeenCalled();
     const idleBars = Array.from(container.querySelectorAll<HTMLElement>(".recording-waveform__bar"));
     expect(new Set(idleBars.map((bar) => bar.style.height)).size).toBeGreaterThan(1);
+    // The row has to fit the narrowest place it appears: bars clipped
+    // mid-width are what made the wave read as bars of uneven thickness, and a
+    // fractional bar width lets each one round to a different device pixel.
+    // Read from the stylesheet — the test environment does not apply it.
+    const css = readFileSync(resolve(here, "../../styles.css"), "utf8");
+    const barRule = /\.recording-waveform__bar \{[^}]*width: ([0-9.]+)px/.exec(css);
+    const rowRule = /\.recording-waveform \{[^}]*gap: ([0-9.]+)px/.exec(css);
+    expect(barRule).not.toBeNull();
+    expect(rowRule).not.toBeNull();
+    const barWidth = Number(barRule![1]);
+    const gap = Number(rowRule![1]);
+    // An integer width, so every bar lands on the same pixel boundary.
+    expect(Number.isInteger(barWidth)).toBe(true);
+    expect(barWidth * idleBars.length + gap * (idleBars.length - 1)).toBeLessThanOrEqual(137);
     await click('[data-testid="topbar"]');
     expect(container.textContent).toContain("录音列表");
     expect(current.compactOpen).toBe(true);

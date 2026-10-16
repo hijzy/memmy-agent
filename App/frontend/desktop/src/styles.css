@@ -14531,7 +14531,14 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .memmy-notification-st
   color: var(--color-status-success);
 }
 
-/* Live loudness uses mic samples; idle has a static mint illustration. */
+/*
+ * Live loudness uses mic samples; idle has a static mint illustration.
+ *
+ * Bars are an integer 2px wide. A fractional width lets each bar round to a
+ * different device pixel, so a row built from them looks like bars of varying
+ * thickness — the whole row reads as uneven even though the CSS asks for one
+ * width. The mask fades the ends so a clipped bar looks deliberate.
+ */
 .recording-waveform {
   display: flex;
   align-items: center;
@@ -14541,22 +14548,36 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .memmy-notification-st
   flex: 1 1 120px;
   min-width: 80px;
   overflow: hidden;
+  color: color-mix(in srgb, var(--color-text-ink) 20%, transparent);
+  mask-image: linear-gradient(to right, transparent, black 12%, black 88%, transparent);
 }
 
 .recording-waveform__bar {
-  flex: 0 0 1.5px;
-  width: 1.5px;
-  border-radius: 1px;
-  background: color-mix(in srgb, var(--color-text-ink) 18%, transparent);
+  flex: 0 0 2px;
+  width: 2px;
+  border-radius: var(--radius-pill);
+  background: currentColor;
+  transform-origin: center;
   transition: height 90ms linear;
 }
 
 .recording-waveform--idle .recording-waveform__bar {
-  background: color-mix(in srgb, var(--color-action-sky) 35%, transparent);
+  color: color-mix(in srgb, var(--color-action-sky) 38%, transparent);
 }
 
 .recording-waveform--active .recording-waveform__bar {
-  background: color-mix(in srgb, var(--color-action-sky) 55%, transparent);
+  color: var(--color-action-sky);
+}
+
+@keyframes recording-waveform-pulse {
+  from { transform: scaleY(.45); }
+  to { transform: scaleY(1); }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .recording-waveform--active .recording-waveform__bar {
+    animation: recording-waveform-pulse 650ms ease-in-out infinite alternate;
+  }
 }
 
 .recording-panel__heading {
@@ -14924,7 +14945,7 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .memmy-notification-st
 .recording-bar--interview .recording-bar__icon { width: 34px; height: 34px; border-radius: 9px; background: color-mix(in srgb, var(--color-action-sky) 7%, var(--color-background-paper)); }
 .recording-bar--interview .recording-bar__title { font-size: 14px; font-weight: 600; color: var(--color-text-ink); }
 .recording-bar--interview .recording-bar__clock { color: color-mix(in srgb, var(--color-text-ink) 60%, var(--color-background-paper)); }
-.recording-bar--interview .recording-waveform { height: 30px; flex-basis: 60px; min-width: 40px; max-width: 180px; margin: 0 auto; }
+.recording-bar--interview .recording-waveform { height: 30px; flex-basis: 137px; min-width: 40px; max-width: 180px; margin: 0 auto; }
 .recording-bar--interview .recording-bar__button { padding: 6px 10px; }
 .recording-bar--interview.recording-bar--live .recording-bar__icon { background: color-mix(in srgb, var(--color-status-error) 8%, var(--color-background-paper)); }
 .recording-entry-card { margin-bottom: 10px; }
